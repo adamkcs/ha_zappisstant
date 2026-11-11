@@ -41,6 +41,8 @@ export interface ZappiCardConfig {
   home_power_entity?: string;
   show_power_flow?: boolean;
   show_boost?: boolean;
+  /** Show the next scheduled charge when the Zappistant integration is installed. */
+  show_upcoming?: boolean;
   /** Last read battery state of health, for future range/capacity calculations. */
   battery_soh_percent?: number;
   /** Highest charge % the card targets unless 100% is chosen explicitly. */

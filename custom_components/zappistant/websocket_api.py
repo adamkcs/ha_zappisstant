@@ -17,6 +17,7 @@ from .controller import ScheduleController
 def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_schedule)
     websocket_api.async_register_command(hass, ws_save_schedule)
+    websocket_api.async_register_command(hass, ws_set_override)
 
 
 def _controller(
@@ -52,3 +53,29 @@ async def ws_save_schedule(
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
         return
     connection.send_result(msg["id"], {"schedule": schedule, "status": controller.status()})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "zappistant/override/set",
+        vol.Required("date"): str,
+        # Leave out kwh (or send null) to go back to the weekly plan for that date.
+        vol.Optional("kwh"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("start_percent"): vol.Any(None, vol.Coerce(float)),
+    }
+)
+@websocket_api.async_response
+async def ws_set_override(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    if not (controller := _controller(hass, connection, msg)):
+        return
+    override = None
+    if msg.get("kwh") is not None:
+        override = {"kwh": msg["kwh"], "start_percent": msg.get("start_percent")}
+    try:
+        await controller.async_set_override(msg["date"], override)
+    except ValueError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
+        return
+    connection.send_result(msg["id"], {"status": controller.status()})

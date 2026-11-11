@@ -186,6 +186,21 @@ export const cardStyles = css`
   .note.warn {
     color: var(--warning-color);
   }
+  .upcoming {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .upcoming-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--primary-text-color);
+  }
+  .upcoming-head ha-icon {
+    --mdc-icon-size: 20px;
+    color: var(--secondary-text-color);
+  }
   .error {
     color: var(--error-color);
     font-size: 0.85rem;

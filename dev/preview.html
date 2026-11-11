@@ -209,8 +209,8 @@
         states[IDS.mode].attributes = { friendly_name: "myenergi Zappi Charge Mode", options: ["Fast", "Eco", "Eco+", "Stopped"] };
         states[SCHEDULE_STATUS] = {
           entity_id: SCHEDULE_STATUS,
-          state: schedule.enabled ? "waiting" : "disabled",
-          attributes: { planned_kwh: 21, delivered_kwh: 0, next_interval: { start: "22:00", end: "24:00" } },
+          state: schedule.enabled ? "idle" : "disabled",
+          attributes: { run_date: null, planned_kwh: null, delivered_kwh: null, upcoming: mockUpcoming() },
         };
         return { states, entities, language: "en", callService, callWS };
       };
@@ -227,18 +227,83 @@
           day(),
           day({ enabled: true, start_percent: 45, target_percent: 80, kwh: 21, intervals: [{ start: "22:00", end: "24:00", overrun: false }] }),
           day({ enabled: true, start_percent: 45, target_percent: 100, kwh: 32, intervals: [{ start: "00:00", end: "05:00", overrun: false }, { start: "22:00", end: "24:00", overrun: true }] }),
-          day(), day(), day(), day(),
+          day({ enabled: true, intervals: [{ start: "00:00", end: "05:00", overrun: false }] }),
+          day(), day(), day(),
         ],
       };
 
+      // One-off adjustments by ISO date, like the integration keeps.
+      const overrides = {};
+      const isoDate = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+      // A JavaScript copy of planner.day_charge() and planner.upcoming(), including overnight merging.
+      const toMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3));
+      const fmt = (m) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+      const dateAt = (offset) => {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+      };
+      function planFor(d) {
+        const weekly = schedule.days[(d.getDay() + 6) % 7];
+        const override = overrides[isoDate(d)];
+        return override ? { ...weekly, kwh: override.kwh } : weekly;
+      }
+      function runsOvernight(d) {
+        const plan = planFor(d);
+        const last = plan.intervals[plan.intervals.length - 1];
+        return plan.enabled && !!plan.kwh && !!last && last.end === "24:00" && last.start !== "00:00";
+      }
+      function dayCharge(offset) {
+        const d = dateAt(offset);
+        const plan = planFor(d);
+        if (!plan.enabled || !plan.kwh) return null;
+        let windows = plan.intervals.map((iv) => ({ start: toMin(iv.start), end: toMin(iv.end), overrun: iv.overrun }));
+        if (windows[0]?.start === 0 && runsOvernight(dateAt(offset - 1))) windows = windows.slice(1);
+        if (!windows.length) return null;
+        const next = planFor(dateAt(offset + 1));
+        if (runsOvernight(d) && next.enabled && next.intervals[0]?.start === "00:00") {
+          const last = windows[windows.length - 1];
+          windows[windows.length - 1] = { ...last, end: 1440 + toMin(next.intervals[0].end) };
+        }
+        return { kwh: plan.kwh, windows };
+      }
+      function mockUpcoming() {
+        if (!schedule.enabled) return null;
+        const now = new Date();
+        for (let offset = -1; offset <= 7; offset++) {
+          const charge = dayCharge(offset);
+          if (!charge) continue;
+          const minute = now.getHours() * 60 + now.getMinutes() - offset * 1440;
+          if (charge.windows.every((w) => w.end <= minute)) continue;
+          const d = dateAt(offset);
+          const weekly = schedule.days[(d.getDay() + 6) % 7];
+          const override = overrides[isoDate(d)];
+          return {
+            date: isoDate(d),
+            intervals: charge.windows
+              .filter((w) => w.end > minute)
+              .map((w) => ({ start: fmt(w.start), end: fmt(w.end > 1440 ? w.end - 1440 : w.end), overrun: w.overrun, ends_next_day: w.end > 1440 })),
+            start_percent: override ? override.start_percent : weekly.start_percent,
+            target_percent: weekly.target_percent,
+            kwh: charge.kwh,
+            planned_kwh: weekly.kwh,
+            overridden: !!override,
+          };
+        }
+        return null;
+      }
+
       async function callWS(msg) {
-        log.unshift(`ws ${msg.type}`);
+        log.unshift(`ws ${msg.type} ${msg.date ? JSON.stringify({ date: msg.date, kwh: msg.kwh, start_percent: msg.start_percent }) : ""}`);
         document.getElementById("log").textContent = log.slice(0, 20).join("\n");
         await new Promise((r) => setTimeout(r, 300));
-        if (msg.type === "zappistant/schedule/save") {
-          schedule = structuredClone(msg.schedule);
-          refresh();
+        if (msg.type === "zappistant/schedule/save") schedule = structuredClone(msg.schedule);
+        if (msg.type === "zappistant/override/set") {
+          if (msg.kwh == null) delete overrides[msg.date];
+          else overrides[msg.date] = { kwh: msg.kwh, start_percent: msg.start_percent ?? null };
         }
+        refresh();
         return { schedule: structuredClone(schedule), status: {} };
       }
 

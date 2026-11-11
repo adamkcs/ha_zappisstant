@@ -157,6 +157,33 @@ async def test_waits_while_unplugged(hass: HomeAssistant, freezer: FrozenDateTim
     assert [c.data["amount"] for c in calls["boost"]] == [10]
 
 
+async def test_override_adjusts_upcoming_charge(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, setup
+) -> None:
+    calls, save, client = setup
+    await save(_schedule([{"start": "22:00", "end": "23:00"}], kwh=20))
+    assert hass.states.get(SCHEDULE_STATUS).attributes["upcoming"]["kwh"] == 20
+
+    await client.send_json_auto_id(
+        {"type": "zappistant/override/set", "date": "2026-11-10", "kwh": 12, "start_percent": 60}
+    )
+    result = await client.receive_json()
+    assert result["success"]
+    upcoming = hass.states.get(SCHEDULE_STATUS).attributes["upcoming"]
+    assert (upcoming["kwh"], upcoming["start_percent"], upcoming["overridden"]) == (12, 60, True)
+
+    await _move_to(hass, freezer, datetime(2026, 11, 10, 22, 0, 30, tzinfo=dt_util.UTC))
+    assert [c.data["amount"] for c in calls["boost"]] == [12]
+
+    # Clearing the override goes back to the weekly plan.
+    await client.send_json_auto_id({"type": "zappistant/override/set", "date": "2026-11-10"})
+    assert (await client.receive_json())["success"]
+    assert hass.states.get(SCHEDULE_STATUS).attributes["upcoming"]["kwh"] == 20
+
+    await client.send_json_auto_id({"type": "zappistant/override/set", "date": "not-a-date", "kwh": 5})
+    assert not (await client.receive_json())["success"]
+
+
 async def test_schedule_switch(hass: HomeAssistant, setup) -> None:
     _calls, save, _client = setup
     await save(_schedule([{"start": "22:00", "end": "23:00"}]))

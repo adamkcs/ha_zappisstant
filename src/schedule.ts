@@ -28,6 +28,19 @@ export interface Schedule {
   days: DayPlan[];
 }
 
+export interface UpcomingCharge {
+  date: string;
+  /** Merged windows: an overnight one like 22:00–05:00 has ends_next_day set. */
+  intervals: (ScheduleInterval & { ends_next_day: boolean })[];
+  start_percent: number | null;
+  target_percent: number | null;
+  /** kWh this charge will use, including a one-off override. */
+  kwh: number;
+  /** kWh from the weekly plan. */
+  planned_kwh: number | null;
+  overridden: boolean;
+}
+
 export interface ScheduleStatus {
   state: string;
   run_date: string | null;
@@ -36,6 +49,7 @@ export interface ScheduleStatus {
   remaining_kwh: number;
   current_interval: ScheduleInterval | null;
   next_interval: ScheduleInterval | null;
+  upcoming: UpcomingCharge | null;
 }
 
 interface ScheduleResponse {
@@ -48,6 +62,13 @@ export const fetchSchedule = (hass: HomeAssistant) =>
 
 export const saveSchedule = (hass: HomeAssistant, schedule: Schedule) =>
   hass.callWS<ScheduleResponse>({ type: "zappistant/schedule/save", schedule });
+
+/** Adjust one date's charge without changing the weekly plan; kwh null goes back to the plan. */
+export const setOverride = (
+  hass: HomeAssistant,
+  date: string,
+  override: { kwh: number; start_percent: number } | null,
+) => hass.callWS<{ status: ScheduleStatus }>({ type: "zappistant/override/set", date, ...override });
 
 /** "HH:MM" for a half-hour slot index, with 48 meaning "24:00". */
 export function slotTime(slot: number): string {
@@ -99,6 +120,22 @@ export function emptySchedule(): Schedule {
 /** A day the integration will act on: enabled, with slots and an amount. */
 export function isActive(day: DayPlan): boolean {
   return day.enabled && day.intervals.length > 0 && !!day.kwh;
+}
+
+// Overnight charges, mirroring planner.py: a day whose last interval runs to 24:00 continues
+// into the next day's 00:00 interval, as one charge using the first day's kWh.
+
+/** Whether the day's charge continues into the next day's 00:00 interval. */
+export function runsOvernight(day: DayPlan): boolean {
+  const last = day.intervals[day.intervals.length - 1];
+  return isActive(day) && last.end === "24:00" && last.start !== "00:00";
+}
+
+/** Whether a day's 00:00 interval is the end of the previous day's overnight charge. */
+export function continuesPrevious(schedule: Schedule, index: number): boolean {
+  const day = schedule.days[index];
+  const previous = schedule.days[(index + DAY_NAMES.length - 1) % DAY_NAMES.length];
+  return day.enabled && day.intervals[0]?.start === "00:00" && runsOvernight(previous);
 }
 
 /** Monday-first index of today, matching Python's weekday(). */

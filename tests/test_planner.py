@@ -135,5 +135,120 @@ class AdvanceTest(unittest.TestCase):
         self.assertEqual(decision.remaining, 4.0)
 
 
+class OvernightTest(unittest.TestCase):
+    """Tuesday 22:00–24:00 plus Wednesday 00:00–05:00 is one charge, using Tuesday's kWh."""
+
+    def setUp(self):
+        self.schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "24:00"}], kwh=10)
+        self.schedule["days"][TUESDAY + 1] = {
+            **planner.empty_day(),
+            "enabled": True,
+            "kwh": 30,
+            "intervals": [
+                {"start": "00:00", "end": "05:00", "overrun": False},
+                {"start": "22:00", "end": "24:00", "overrun": False},
+            ],
+        }
+
+    def test_merges_adjacent_intervals_when_validating(self):
+        schedule = schedule_with(
+            TUESDAY, [{"start": "20:00", "end": "22:00"}, {"start": "22:00", "end": "24:00", "overrun": True}]
+        )
+        self.assertEqual(
+            schedule["days"][TUESDAY]["intervals"], [{"start": "20:00", "end": "24:00", "overrun": True}]
+        )
+
+    def test_upcoming_shows_one_overnight_slot(self):
+        upcoming = planner.upcoming(self.schedule, at(10, 18))
+        self.assertEqual(upcoming["date"], "2026-11-10")
+        self.assertEqual(
+            upcoming["intervals"],
+            [{"start": "22:00", "end": "05:00", "overrun": False, "ends_next_day": True}],
+        )
+        self.assertEqual(upcoming["kwh"], 10)
+        # Still Tuesday's charge at 01:00 on Wednesday; then Wednesday's own evening charge.
+        self.assertEqual(planner.upcoming(self.schedule, at(11, 1))["date"], "2026-11-10")
+        wednesday = planner.upcoming(self.schedule, at(11, 6))
+        self.assertEqual(wednesday["date"], "2026-11-11")
+        self.assertEqual(wednesday["kwh"], 30)
+        self.assertEqual(wednesday["intervals"][0]["start"], "22:00")
+
+    def test_one_run_across_midnight(self):
+        run, decision = planner.advance(self.schedule, None, at(10, 22), 0.0)
+        self.assertTrue(decision.run_started)
+        run, decision = planner.advance(self.schedule, run, at(11, 1), 4.0)
+        self.assertEqual(run.date, "2026-11-10")
+        self.assertFalse(decision.run_started)
+        self.assertEqual(decision.state, planner.STATE_CHARGING)
+        self.assertEqual(decision.remaining, 6.0)  # Tuesday's 10 kWh, not Wednesday's 30
+        run, decision = planner.advance(self.schedule, run, at(11, 5), 7.0)
+        self.assertEqual(decision.state, planner.STATE_ENDED)
+        run, decision = planner.advance(self.schedule, run, at(11, 22), 7.0)
+        self.assertTrue(decision.run_started)
+        self.assertEqual(decision.remaining, 30.0)
+
+    def test_starts_overnight_run_after_midnight(self):
+        # E.g. Home Assistant restarted, or the schedule was saved at 01:00.
+        run, decision = planner.advance(self.schedule, None, at(11, 1), 0.0)
+        self.assertEqual(run.date, "2026-11-10")
+        self.assertEqual(decision.remaining, 10.0)
+
+    def test_no_merge_when_evening_day_is_off(self):
+        self.schedule["days"][TUESDAY]["enabled"] = False
+        run, decision = planner.advance(self.schedule, None, at(11, 1), 0.0)
+        self.assertEqual(run.date, "2026-11-11")
+        self.assertEqual(decision.remaining, 30.0)
+
+    def test_overrun_on_merged_slot_applies_at_its_end(self):
+        self.schedule["days"][TUESDAY + 1]["intervals"][0]["overrun"] = True
+        run, _ = planner.advance(self.schedule, None, at(10, 22), 0.0)
+        run, decision = planner.advance(self.schedule, run, at(11, 5, 30), 4.0)
+        self.assertEqual(decision.state, planner.STATE_OVERRUN)
+
+
+class OverrideTest(unittest.TestCase):
+    def setUp(self):
+        self.schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "24:00"}], kwh=20)
+        self.schedule["days"][TUESDAY]["start_percent"] = 45
+        self.schedule["days"][TUESDAY]["target_percent"] = 80
+
+    def test_override_replaces_kwh_for_that_date_only(self):
+        overrides = {"2026-11-10": planner.validate_override({"kwh": 16, "start_percent": 52})}
+        _, decision = planner.advance(self.schedule, None, at(10, 22), 0.0, overrides)
+        self.assertEqual(decision.remaining, 16)
+        # A week later the weekly plan applies again.
+        _, decision = planner.advance(self.schedule, None, at(17, 22), 0.0, overrides)
+        self.assertEqual(decision.remaining, 20)
+
+    def test_zero_kwh_override_skips_the_charge(self):
+        overrides = {"2026-11-10": planner.validate_override({"kwh": 0})}
+        run, decision = planner.advance(self.schedule, None, at(10, 22), 0.0, overrides)
+        self.assertIsNone(run)
+        self.assertEqual(decision.state, planner.STATE_IDLE)
+
+    def test_upcoming_today_then_next_week(self):
+        upcoming = planner.upcoming(self.schedule, at(10, 18))
+        self.assertEqual(upcoming["date"], "2026-11-10")
+        self.assertEqual(upcoming["start_percent"], 45)
+        self.assertEqual(upcoming["target_percent"], 80)
+        self.assertEqual(upcoming["kwh"], 20)
+        self.assertFalse(upcoming["overridden"])
+        # While tonight's slot runs it's still the upcoming charge; afterwards it's next Tuesday.
+        self.assertEqual(planner.upcoming(self.schedule, at(10, 23))["date"], "2026-11-10")
+        self.assertEqual(planner.upcoming(self.schedule, at(11, 0, 30))["date"], "2026-11-17")
+
+    def test_upcoming_shows_override(self):
+        overrides = {"2026-11-10": planner.validate_override({"kwh": 16, "start_percent": 52})}
+        upcoming = planner.upcoming(self.schedule, at(10, 18), overrides)
+        self.assertEqual(upcoming["kwh"], 16)
+        self.assertEqual(upcoming["planned_kwh"], 20)
+        self.assertEqual(upcoming["start_percent"], 52)
+        self.assertTrue(upcoming["overridden"])
+
+    def test_no_upcoming_when_disabled(self):
+        self.schedule["enabled"] = False
+        self.assertIsNone(planner.upcoming(self.schedule, at(10, 18)))
+
+
 if __name__ == "__main__":
     unittest.main()

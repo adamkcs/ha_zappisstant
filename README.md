@@ -51,6 +51,7 @@ The card finds the zappi's other sensors from the charge mode entity's device. S
 | `name`                  | device name  | Card title                                           |
 | `show_power_flow`       | `true`       | Show solar, grid and home power                      |
 | `show_boost`            | `true`       | Show boost controls                                  |
+| `show_upcoming`         | `true`       | Show the next scheduled charge (needs Zappistant)    |
 | `battery_soh_percent`   | none         | Last read battery state of health (for later use)    |
 | `max_charge_percent`    | none         | Highest target % unless 100% is picked on the card   |
 | `default_ready_by`      | `07:00`      | Pre-filled "Ready by" time for smart boost           |
@@ -105,6 +106,12 @@ straight to Home Assistant with its own Save button, separately from the card's 
 - **Keep charging after** (per interval): when on, charging continues past that interval's end until
   the day's kWh is delivered, even past midnight. When off, charging stops at the interval's end.
 
+**Overnight charges**: when a day's last slot runs to 24:00 and the next day (also switched on)
+starts with a 00:00 slot, the two are one charge, e.g. Tuesday 22:00–24:00 plus Wednesday
+00:00–05:00 is a single 22:00–05:00 charge. It uses the first day's start %, target % and kWh, and
+counts delivered energy across midnight. The next day's own charge is its remaining slots. The
+schedule editor marks both halves.
+
 Press **Save** to send the plan to Home Assistant. Zappistant then runs it even with no dashboard open:
 
 - At the start of the day's first slot it switches the zappi to Stopped (an integration option, on by
@@ -113,6 +120,12 @@ Press **Save** to send the plan to Home Assistant. Zappistant then runs it even 
 - At the end of a slot it stops the boost, unless that interval keeps charging after.
 - It counts kWh delivered from the zappi's session energy sensor, so a day's later slots only add
   what's still missing. An overrun is dropped if it hasn't finished by the end of the next day.
+
+The card's **Upcoming charge** section shows the next charge the schedule will run (today's if it
+still has slots left, otherwise the next active day) with its expected start %. Change the start %
+to recalculate the kWh from your calibration and press **Apply**: that adjusts only this one charge
+and leaves the weekly plan as it is. 0 kWh (start at or above the target) skips the charge.
+**Use weekly plan** removes the adjustment.
 
 Zappistant adds `sensor.zappi_schedule_status` (with progress attributes) and
 `switch.zappi_schedule_enabled` to turn the whole schedule on or off.

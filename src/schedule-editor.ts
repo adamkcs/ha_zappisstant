@@ -4,11 +4,13 @@ import {
   DAY_NAMES,
   MAX_INTERVALS,
   SLOTS_PER_DAY,
+  continuesPrevious,
   countIntervals,
   emptySchedule,
   fetchSchedule,
   intervalsToSlots,
   isActive,
+  runsOvernight,
   saveSchedule,
   slotsToIntervals,
   todayIndex,
@@ -180,6 +182,20 @@ export class ZappiScheduleEditor extends LitElement {
     `;
   }
 
+  /** Explain intervals that join with the previous or next day into one overnight charge. */
+  private _overnightNote(day: DayPlan, index: number): string | undefined {
+    const schedule = this._schedule!;
+    const previous = (this._day + DAY_NAMES.length - 1) % DAY_NAMES.length;
+    const next = (this._day + 1) % DAY_NAMES.length;
+    if (index === 0 && continuesPrevious(schedule, this._day)) {
+      return `Ends ${DAY_NAMES[previous]}'s overnight charge, using ${DAY_NAMES[previous]}'s kWh`;
+    }
+    if (index === day.intervals.length - 1 && runsOvernight(day) && continuesPrevious(schedule, next)) {
+      return `Continues until ${schedule.days[next].intervals[0].end} on ${DAY_NAMES[next]} as one charge`;
+    }
+    return undefined;
+  }
+
   private _renderDay(day: DayPlan): TemplateResult {
     const name = DAY_NAMES[this._day];
     const slots = intervalsToSlots(day.intervals);
@@ -259,6 +275,11 @@ export class ZappiScheduleEditor extends LitElement {
                       />
                       Keep charging after until the kWh is reached
                     </label>
+                    ${this._overnightNote(day, i)
+                      ? html`<span class="overnight">
+                          <ha-icon icon="mdi:weather-night"></ha-icon>${this._overnightNote(day, i)}
+                        </span>`
+                      : nothing}
                   </div>
                 `,
               )}
@@ -458,6 +479,17 @@ export class ZappiScheduleEditor extends LitElement {
     .interval-time {
       font-variant-numeric: tabular-nums;
       min-width: 96px;
+    }
+    .overnight {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex-basis: 100%;
+      font-size: 0.8rem;
+      color: var(--secondary-text-color);
+    }
+    .overnight ha-icon {
+      --mdc-icon-size: 16px;
     }
     .amounts,
     .copy {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import logging
 import math
 from typing import Any
@@ -30,10 +30,11 @@ from .planner import (
     STATE_DISABLED,
     Decision,
     Run,
-    active_plan,
     advance,
     empty_schedule,
     next_interval,
+    upcoming,
+    validate_override,
     validate_schedule,
 )
 
@@ -61,6 +62,8 @@ class ScheduleController:
             CONF_SWITCH_TO_STOPPED, entry.data.get(CONF_SWITCH_TO_STOPPED, True)
         )
         self.schedule: dict[str, Any] = empty_schedule()
+        # One-off adjustments keyed by ISO date, e.g. a different start % for one evening.
+        self.overrides: dict[str, dict[str, Any]] = {}
         self.run: Run | None = None
         self.decision = Decision(STATE_DISABLED)
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}")
@@ -78,6 +81,7 @@ class ScheduleController:
                 self.schedule = validate_schedule(data["schedule"])
             except (ValueError, KeyError, TypeError):
                 _LOGGER.warning("Stored schedule is invalid, starting with an empty one")
+        self.overrides = data.get("overrides") or {}
         self.run = Run.from_dict(data.get("run"))
         self._boost_started = data.get("boost_started", False)
 
@@ -108,13 +112,21 @@ class ScheduleController:
         await self.async_update()
         return self.schedule
 
+    async def async_set_override(self, day: str, override: dict[str, Any] | None) -> None:
+        """Adjust one date's charge, or clear the adjustment with None. Raises ValueError."""
+        day = date.fromisoformat(day).isoformat()
+        if override is None:
+            self.overrides.pop(day, None)
+        else:
+            self.overrides[day] = validate_override(override)
+        await self.async_update()
+
     async def async_set_enabled(self, enabled: bool) -> None:
         self.schedule = {**self.schedule, "enabled": enabled}
         await self.async_update()
 
     def status(self) -> dict[str, Any]:
         now = dt_util.now()
-        plan = active_plan(self.schedule, now.date())
         return {
             "state": self.decision.state,
             "run_date": self.run.date if self.run else None,
@@ -122,7 +134,8 @@ class ScheduleController:
             "delivered_kwh": round(self.run.delivered, 2) if self.run else None,
             "remaining_kwh": round(self.decision.remaining, 2),
             "current_interval": self.decision.interval,
-            "next_interval": next_interval(plan, now.hour * 60 + now.minute) if plan else None,
+            "next_interval": next_interval(self.schedule, now, self.overrides),
+            "upcoming": upcoming(self.schedule, now, self.overrides),
         }
 
     async def _async_tick(self, _now: datetime) -> None:
@@ -134,8 +147,11 @@ class ScheduleController:
     async def async_update(self) -> None:
         async with self._lock:
             now = dt_util.now()
+            # Yesterday's override can still matter while its charge overruns past midnight.
+            oldest = (now.date() - timedelta(days=1)).isoformat()
+            self.overrides = {day: o for day, o in self.overrides.items() if day >= oldest}
             self.run, self.decision = advance(
-                self.schedule, self.run, now, self._float_state(self.session_entity)
+                self.schedule, self.run, now, self._float_state(self.session_entity), self.overrides
             )
             try:
                 await self._async_apply(now)
@@ -194,6 +210,7 @@ class ScheduleController:
     def _data(self) -> dict[str, Any]:
         return {
             "schedule": self.schedule,
+            "overrides": self.overrides,
             "run": self.run.as_dict() if self.run else None,
             "boost_started": self._boost_started,
         }

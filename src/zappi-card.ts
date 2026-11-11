@@ -1,7 +1,8 @@
 import { LitElement, html, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { kwhForTarget, summarizeCalibration } from "./calibration";
-import { findChargeModeSelect, resolveEntities, type ZappiEntities } from "./entities";
+import { findChargeModeSelect, findScheduleStatus, resolveEntities, type ZappiEntities } from "./entities";
+import { DAY_NAMES, setOverride, type ScheduleStatus, type UpcomingCharge } from "./schedule";
 import { cardStyles } from "./styles";
 import type { HomeAssistant, LovelaceCardEditor, ZappiCardConfig } from "./types";
 import "./editor";
@@ -26,6 +27,12 @@ const DEFAULT_READY_BY = "07:00";
 /** "custom" uses the typed target; the others pin the target to a preset. */
 type TargetPreset = "custom" | "max" | "full";
 
+const SCHEDULE_STATES: Record<string, string> = {
+  waiting: "Waiting for next slot",
+  charging: "Charging",
+  overrun: "Charging past slot",
+};
+
 type BoostPlan = { kwh: number; from?: number; to: number } | { problem: string };
 
 console.info(`%c ZAPPI-CARD %c ${CARD_VERSION} `, "color: white; background: #43a047", "");
@@ -40,6 +47,10 @@ export class ZappiCard extends LitElement {
   @state() private _boostBy = DEFAULT_READY_BY;
   @state() private _pending?: string;
   @state() private _error?: string;
+  @state() private _upcomingStart = "";
+
+  /** Which upcoming charge the start % input was filled from, so it refills when that changes. */
+  private _upcomingKey?: string;
 
   private _entities?: ZappiEntities;
   private _registry?: HomeAssistant["entities"];
@@ -63,7 +74,13 @@ export class ZappiCard extends LitElement {
     if (config.default_ready_by !== this._config?.default_ready_by) {
       this._boostBy = config.default_ready_by ?? DEFAULT_READY_BY;
     }
-    this._config = { show_power_flow: true, show_boost: true, switch_to_stopped: true, ...config };
+    this._config = {
+      show_power_flow: true,
+      show_boost: true,
+      show_upcoming: true,
+      switch_to_stopped: true,
+      ...config,
+    };
     this._kwhPerPercent = summarizeCalibration(config.calibration).kwhPerPercent;
     if (this._preset === "max" && config.max_charge_percent === undefined) this._preset = "custom";
     this._entities = undefined;
@@ -76,6 +93,13 @@ export class ZappiCard extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // Discovery only depends on the config and the entity registry, so skip it on state updates.
     if (!this.hass || !(changed.has("hass") || changed.has("_config"))) return;
+    // Refill the upcoming start % from the schedule when the upcoming charge or its saved start changes.
+    const upcoming = this._scheduleStatus()?.upcoming;
+    const key = upcoming ? `${upcoming.date}|${upcoming.start_percent}` : undefined;
+    if (upcoming && key !== this._upcomingKey) {
+      this._upcomingStart = upcoming.start_percent === null ? "" : String(upcoming.start_percent);
+    }
+    this._upcomingKey = key;
     if (!this._entities || this.hass.entities !== this._registry) {
       this._registry = this.hass.entities;
       this._entities = resolveEntities(this.hass, this._config);
@@ -215,6 +239,7 @@ export class ZappiCard extends LitElement {
         ${this._renderStats()}
         ${this._renderModes(modeEntity.state, modeEntity.attributes.options as string[] | undefined)}
         ${this._config.show_boost ? this._renderBoost() : nothing}
+        ${this._config.show_upcoming ? this._renderUpcoming() : nothing}
         ${this._error ? html`<div class="error">${this._error}</div>` : nothing}
       </ha-card>
     `;
@@ -409,6 +434,118 @@ export class ZappiCard extends LitElement {
           <button class="danger" ?disabled=${busy} @click=${this._stopBoost}>
             <ha-icon icon="mdi:stop"></ha-icon>Stop boost
           </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private _scheduleStatus(): ScheduleStatus | undefined {
+    const entityId = findScheduleStatus(this.hass);
+    const entity = entityId ? this.hass.states[entityId] : undefined;
+    return entity ? ({ ...entity.attributes, state: entity.state } as ScheduleStatus) : undefined;
+  }
+
+  private _dayLabel(isoDate: string): string {
+    const [y, m, d] = isoDate.split("-").map(Number);
+    const date = new Date(y, m - 1, d);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.round((date.getTime() - today.getTime()) / 86_400_000);
+    // An overnight charge that started yesterday evening is still running.
+    if (days === -1) return "Last night";
+    if (days === 0) return "Today";
+    if (days === 1) return "Tomorrow";
+    return `${DAY_NAMES[(date.getDay() + 6) % 7]} ${d}/${m}`;
+  }
+
+  /** kWh for the upcoming charge from the typed start %, or why it can't be worked out. */
+  private _upcomingPlan(upcoming: UpcomingCharge): { kwh: number; start: number } | { problem: string } {
+    const start = this._parsePercent(this._upcomingStart);
+    const target = upcoming.target_percent;
+    if (target === null) return { problem: "Set a target % for this day in the schedule to recalculate." };
+    if (this._kwhPerPercent === undefined) {
+      return { problem: "Add calibration charges in the card settings to recalculate." };
+    }
+    if (start === undefined || start < 0 || start > 100) return { problem: "Enter the expected start %." };
+    // At or above the target there's nothing to charge; applying 0 kWh skips this charge.
+    return { kwh: Math.ceil(kwhForTarget(this._kwhPerPercent, start, target)), start };
+  }
+
+  private _applyUpcoming(upcoming: UpcomingCharge, override: { kwh: number; start_percent: number } | null): void {
+    void this._call("upcoming", () => setOverride(this.hass, upcoming.date, override));
+  }
+
+  private _renderUpcoming(): TemplateResult | typeof nothing {
+    const status = this._scheduleStatus();
+    if (!status) return nothing;
+    const upcoming = status.upcoming;
+    if (!upcoming) {
+      return html`<div>
+        <div class="section-label">Upcoming charge</div>
+        <div class="estimate problem">
+          ${status.state === "disabled" ? "The schedule is off." : "Nothing scheduled in the next week."}
+        </div>
+      </div>`;
+    }
+
+    const plan = this._upcomingPlan(upcoming);
+    const changed = "kwh" in plan && (plan.kwh !== upcoming.kwh || plan.start !== upcoming.start_percent);
+    const running = status.run_date === upcoming.date && ["charging", "overrun", "waiting"].includes(status.state);
+    const busy = this._pending !== undefined;
+
+    return html`
+      <div class="upcoming">
+        <div class="section-label">Upcoming charge</div>
+        <div class="upcoming-head">
+          <ha-icon icon="mdi:calendar-clock"></ha-icon>
+          <span>
+            <strong>${this._dayLabel(upcoming.date)}</strong>
+            · ${upcoming.intervals.map((iv) => `${iv.start}–${iv.end}`).join(", ")}
+            ${upcoming.target_percent !== null ? html` · to ${upcoming.target_percent}%` : nothing}
+          </span>
+        </div>
+        <div class="boost-row">
+          <label class="field">
+            Start
+            <input
+              type="number"
+              inputmode="numeric"
+              min="0"
+              max="100"
+              step="1"
+              .value=${this._upcomingStart}
+              @input=${(ev: Event) => (this._upcomingStart = (ev.target as HTMLInputElement).value)}
+            />
+            %
+          </label>
+          <span class="estimate">
+            ${"kwh" in plan
+              ? html`→ <strong>${plan.kwh} kWh</strong>${plan.kwh === 0 ? " (skips this charge)" : ""}`
+              : nothing}
+          </span>
+          ${changed
+            ? html`<button
+                class="primary"
+                ?disabled=${busy}
+                @click=${() => "kwh" in plan && this._applyUpcoming(upcoming, { kwh: plan.kwh, start_percent: plan.start })}
+              >
+                Apply
+              </button>`
+            : nothing}
+          ${upcoming.overridden
+            ? html`<button ?disabled=${busy} @click=${() => this._applyUpcoming(upcoming, null)}>
+                Use weekly plan
+              </button>`
+            : nothing}
+        </div>
+        <div class="estimate problem">
+          ${"problem" in plan
+            ? plan.problem
+            : running
+              ? `${SCHEDULE_STATES[status.state]} · ${(status.delivered_kwh ?? 0).toFixed(1)} of ${upcoming.kwh} kWh`
+              : upcoming.overridden
+                ? `Adjusted for this charge: ${upcoming.kwh} kWh instead of ${upcoming.planned_kwh} kWh.`
+                : `Planned: ${upcoming.kwh} kWh. Change the start % to adjust just this charge.`}
         </div>
       </div>
     `;
