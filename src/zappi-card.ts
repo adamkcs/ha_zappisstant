@@ -21,10 +21,12 @@ const UNAVAILABLE = ["unavailable", "unknown"];
 const MIN_BOOST_KWH = 1;
 const MAX_BOOST_KWH = 99;
 
+const DEFAULT_READY_BY = "07:00";
+
 /** "custom" uses the typed target; the others pin the target to a preset. */
 type TargetPreset = "custom" | "max" | "full";
 
-type BoostPlan = { kwh: number; from: number; to: number } | { problem: string };
+type BoostPlan = { kwh: number; from?: number; to: number } | { problem: string };
 
 console.info(`%c ZAPPI-CARD %c ${CARD_VERSION} `, "color: white; background: #43a047", "");
 
@@ -35,7 +37,7 @@ export class ZappiCard extends LitElement {
   @state() private _currentPercent = "";
   @state() private _targetPercent = "";
   @state() private _preset: TargetPreset = "custom";
-  @state() private _boostBy = "07:00";
+  @state() private _boostBy = DEFAULT_READY_BY;
   @state() private _pending?: string;
   @state() private _error?: string;
 
@@ -57,7 +59,11 @@ export class ZappiCard extends LitElement {
     if (!config.entity) {
       throw new Error("Set 'entity' to the myenergi zappi charge mode select entity");
     }
-    this._config = { show_power_flow: true, show_boost: true, ...config };
+    // Only reset the time picker when the configured default changes, not on every config update.
+    if (config.default_ready_by !== this._config?.default_ready_by) {
+      this._boostBy = config.default_ready_by ?? DEFAULT_READY_BY;
+    }
+    this._config = { show_power_flow: true, show_boost: true, switch_to_stopped: true, ...config };
     this._kwhPerPercent = summarizeCalibration(config.calibration).kwhPerPercent;
     if (this._preset === "max" && config.max_charge_percent === undefined) this._preset = "custom";
     this._entities = undefined;
@@ -124,6 +130,8 @@ export class ZappiCard extends LitElement {
     const max = this._config.max_charge_percent;
     const from = this._parsePercent(this._currentPercent);
     const to = this._targetValue();
+    // A full charge needs no estimate: boost the most we can and let the car stop when full.
+    if (this._preset === "full") return { kwh: MAX_BOOST_KWH, to: 100 };
     if (this._kwhPerPercent === undefined) {
       return { problem: "Add calibration charges in the card settings to estimate kWh." };
     }
@@ -144,22 +152,34 @@ export class ZappiCard extends LitElement {
     this._preset = this._preset === preset ? "custom" : preset;
   }
 
-  private _boost(kwh: number): void {
-    void this._call("boost", () =>
-      this.hass.callService("myenergi", "myenergi_boost", { amount: kwh }, { entity_id: this._config.entity }),
-    );
+  private _mode(): string | undefined {
+    return this._state(this._config.entity);
   }
 
-  private _smartBoost(kwh: number): void {
-    void this._call("smart-boost", () =>
-      this.hass.callService(
-        "myenergi",
-        "myenergi_smart_boost",
-        // The integration strips ":" and expects HHMM, so drop any seconds.
-        { amount: kwh, when: this._boostBy.slice(0, 5) },
-        { entity_id: this._config.entity },
-      ),
-    );
+  /** A target boost only ends at the target if the zappi falls back to Stopped afterwards. */
+  private _willSwitchToStopped(): boolean {
+    return !!this._config.switch_to_stopped && this._preset !== "full" && this._mode() !== "Stopped";
+  }
+
+  private _startBoost(kind: "boost" | "smart-boost", kwh: number): void {
+    const target = { entity_id: this._config.entity };
+    void this._call(kind, async () => {
+      // Set the mode first: changing mode afterwards could cancel the boost.
+      if (this._willSwitchToStopped()) {
+        await this.hass.callService("select", "select_option", { option: "Stopped" }, target);
+      }
+      if (kind === "boost") {
+        await this.hass.callService("myenergi", "myenergi_boost", { amount: kwh }, target);
+      } else {
+        await this.hass.callService(
+          "myenergi",
+          "myenergi_smart_boost",
+          // The integration strips ":" and expects HHMM, so drop any seconds.
+          { amount: kwh, when: this._boostBy.slice(0, 5) },
+          target,
+        );
+      }
+    });
   }
 
   private _stopBoost(): void {
@@ -358,13 +378,11 @@ export class ZappiCard extends LitElement {
         <div class="estimate ${"problem" in plan ? "problem" : ""}">
           ${"problem" in plan
             ? plan.problem
-            : html`≈ <strong>${plan.kwh} kWh</strong> to charge from ${plan.from}% to ${plan.to}%`}
+            : plan.from === undefined
+              ? html`Full charge: <strong>${plan.kwh} kWh</strong>, the car stops when it's full`
+              : html`≈ <strong>${plan.kwh} kWh</strong> to charge from ${plan.from}% to ${plan.to}%`}
         </div>
-        <div class="boost-row">
-          <button ?disabled=${busy || kwh === undefined} @click=${() => kwh && this._boost(kwh)}>
-            <ha-icon icon="mdi:rocket-launch"></ha-icon>Boost now
-          </button>
-        </div>
+        ${kwh !== undefined ? this._renderModeNote() : nothing}
         <div class="boost-row">
           <label class="field">
             Ready by
@@ -376,10 +394,16 @@ export class ZappiCard extends LitElement {
             />
           </label>
           <button
+            class="primary"
             ?disabled=${busy || kwh === undefined || !this._boostBy}
-            @click=${() => kwh && this._smartBoost(kwh)}
+            @click=${() => kwh && this._startBoost("smart-boost", kwh)}
           >
             <ha-icon icon="mdi:clock-fast"></ha-icon>Smart boost
+          </button>
+        </div>
+        <div class="boost-row">
+          <button ?disabled=${busy || kwh === undefined} @click=${() => kwh && this._startBoost("boost", kwh)}>
+            <ha-icon icon="mdi:rocket-launch"></ha-icon>Boost now
           </button>
           <!-- Always offered: a scheduled smart boost reports "Paused", not "Boosting". -->
           <button class="danger" ?disabled=${busy} @click=${this._stopBoost}>
@@ -388,6 +412,23 @@ export class ZappiCard extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  /** Explain what happens after the boost, since the zappi falls back to the selected mode. */
+  private _renderModeNote(): TemplateResult | typeof nothing {
+    const mode = this._mode();
+    if (this._preset === "full" || mode === "Stopped" || mode === undefined) return nothing;
+    if (this._willSwitchToStopped()) {
+      return html`<div class="note">
+        <ha-icon icon="mdi:information-outline"></ha-icon>Switches from ${mode} to Stopped first, so charging ends at the target.
+      </div>`;
+    }
+    return html`<div class="note warn">
+      <ha-icon icon="mdi:alert-outline"></ha-icon>
+      ${mode === "Eco+"
+        ? "After the boost the zappi carries on in Eco+ and may charge past the target from surplus solar."
+        : `After the boost the zappi carries on charging in ${mode}, so it won't stop at the target.`}
+    </div>`;
   }
 }
 

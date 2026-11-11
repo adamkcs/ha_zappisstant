@@ -81,7 +81,50 @@ export class ZappiCardEditor extends LitElement {
         <h3>Display</h3>
         ${this._renderForm(DISPLAY_SCHEMA)}
       </div>
-      ${this._renderBatteryHealth()} ${this._renderCalibration()}
+      ${this._renderBatteryHealth()} ${this._renderTargetCharging()} ${this._renderCalibration()}
+    `;
+  }
+
+  private _renderTargetCharging(): TemplateResult {
+    const config = this._config!;
+    return html`
+      <div class="section">
+        <h3>Target charging</h3>
+        <div class="health">
+          <label class="health-field">
+            <span>Default "Ready by" time</span>
+            <span class="with-unit">
+              <input
+                type="time"
+                step="900"
+                .value=${config.default_ready_by ?? "07:00"}
+                @change=${(ev: Event) =>
+                  this._emit({ ...config, default_ready_by: (ev.target as HTMLInputElement).value || undefined })}
+              />
+            </span>
+            <span class="hint">Pre-filled for smart boost on the card.</span>
+          </label>
+          <label class="health-field">
+            <span class="with-unit">
+              <input
+                type="checkbox"
+                .checked=${config.switch_to_stopped !== false}
+                @change=${(ev: Event) =>
+                  this._emit({
+                    ...config,
+                    // On is the default, so only store it when turned off.
+                    switch_to_stopped: (ev.target as HTMLInputElement).checked ? undefined : false,
+                  })}
+              />
+              Switch to Stopped before boosting
+            </span>
+            <span class="hint">
+              After a boost the zappi returns to its charge mode. Stopped makes charging end at the target.
+              Not applied to 100% charges.
+            </span>
+          </label>
+        </div>
+      </div>
     `;
   }
 
@@ -250,6 +293,13 @@ export class ZappiCardEditor extends LitElement {
     }
     .with-unit input {
       width: 80px;
+    }
+    .with-unit input[type="time"] {
+      width: auto;
+    }
+    .with-unit input[type="checkbox"] {
+      width: auto;
+      margin: 0;
     }
     .slots {
       display: grid;

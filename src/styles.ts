@@ -112,6 +112,13 @@ export const cardStyles = css`
     background: var(--zappi-accent);
     color: var(--text-primary-color, #fff);
   }
+  button.primary {
+    background: var(--zappi-accent);
+    color: var(--text-primary-color, #fff);
+  }
+  button.primary:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--zappi-accent) 85%, #000);
+  }
   button.danger {
     color: var(--error-color);
   }
@@ -164,6 +171,20 @@ export const cardStyles = css`
   }
   .estimate.problem {
     color: var(--secondary-text-color);
+  }
+  .note {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 0.85rem;
+    color: var(--secondary-text-color);
+  }
+  .note ha-icon {
+    --mdc-icon-size: 18px;
+    flex-shrink: 0;
+  }
+  .note.warn {
+    color: var(--warning-color);
   }
   .error {
     color: var(--error-color);

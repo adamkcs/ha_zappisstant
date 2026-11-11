@@ -52,6 +52,8 @@ The card finds the zappi's other sensors from the charge mode entity's device. S
 | `solar_power_entity`    | auto          | Solar generation power                              |
 | `home_power_entity`     | auto          | Home consumption power                              |
 
+| `default_ready_by`      | `07:00`       | Pre-filled "Ready by" time for smart boost          |
+| `switch_to_stopped`     | `true`        | Switch to Stopped before a target boost (see below) |
 | `calibration`           | none          | Up to 5 past charges, see below                     |
 
 ### Battery calibration
@@ -63,7 +65,16 @@ percent of the complete rows. The result includes charging losses.
 
 On the card, enter the battery's current % and a target %. The card shows the kWh it will boost.
 An empty target means the max charge allowed (or 100% if none is set). **Max allowed** pins the
-target to `max_charge_percent`, and **100%** to a full charge (overriding the max).
+target to `max_charge_percent`. **100%** sets a 99 kWh boost (the maximum, overriding the max
+allowed) and needs no current % or calibration, since the car stops itself when full.
+
+**Smart boost** is the main action: it charges the kWh by the "Ready by" time, using myenergi's
+scheduling (and cheap tariff slots, if set up in the myenergi app). **Boost now** charges immediately.
+
+When a boost finishes, the zappi returns to its charge mode. In Fast or Eco it keeps charging, and in
+Eco+ it may continue from surplus solar, so it wouldn't stop at the target. With `switch_to_stopped`
+on (the default), the card switches the zappi to Stopped before starting a target boost. 100% charges
+are left in their current mode.
 
 ```yaml
 calibration:

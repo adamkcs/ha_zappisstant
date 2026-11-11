@@ -44,6 +44,10 @@ export interface ZappiCardConfig {
   battery_soh_percent?: number;
   /** Highest charge % the card targets unless 100% is chosen explicitly. */
   max_charge_percent?: number;
+  /** Pre-filled "Ready by" time for smart boost, as HH:MM. */
+  default_ready_by?: string;
+  /** Switch to Stopped before a target boost so charging ends at the target. Defaults to true. */
+  switch_to_stopped?: boolean;
   /** Past charging sessions used to convert battery percentage to kWh. */
   calibration?: CalibrationSlot[];
 }
