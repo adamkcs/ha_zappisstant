@@ -42,7 +42,8 @@ The card finds the zappi's other sensors from the charge mode entity's device. S
 | `name`                  | device name   | Card title                                          |
 | `show_power_flow`       | `true`        | Show solar, grid and home power                     |
 | `show_boost`            | `true`        | Show boost controls                                 |
-| `default_boost_kwh`     | `10`          | Pre-filled boost amount                             |
+| `battery_soh_percent`   | none          | Last read battery state of health (for later use)   |
+| `max_charge_percent`    | none          | Highest target % unless 100% is picked on the card  |
 | `status_entity`         | auto          | Status sensor (Paused / Charging / Boosting / ...)  |
 | `plug_status_entity`    | auto          | Plug status sensor                                  |
 | `charge_power_entity`   | auto          | Charge power sensor (CT internal load)              |
@@ -59,6 +60,10 @@ Cars without onboard charge limiting (e.g. MG5) can't tell the zappi to stop at 
 The card estimates instead: in the card editor's **Battery calibration** section, enter up to five
 past charges (battery % before, kWh the zappi added, battery % after). It averages the kWh per
 percent of the complete rows. The result includes charging losses.
+
+On the card, enter the battery's current % and a target %. The card shows the kWh it will boost.
+An empty target means the max charge allowed (or 100% if none is set). **Max allowed** pins the
+target to `max_charge_percent`, and **100%** to a full charge (overriding the max).
 
 ```yaml
 calibration:

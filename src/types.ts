@@ -40,7 +40,10 @@ export interface ZappiCardConfig {
   home_power_entity?: string;
   show_power_flow?: boolean;
   show_boost?: boolean;
-  default_boost_kwh?: number;
+  /** Last read battery state of health, for future range/capacity calculations. */
+  battery_soh_percent?: number;
+  /** Highest charge % the card targets unless 100% is chosen explicitly. */
+  max_charge_percent?: number;
   /** Past charging sessions used to convert battery percentage to kWh. */
   calibration?: CalibrationSlot[];
 }

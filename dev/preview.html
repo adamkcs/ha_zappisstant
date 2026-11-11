@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zappi Card Preview</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/MaterialDesign-Webfont/7.4.47/css/materialdesignicons.min.css"
+    />
+    <style>
+      /* A rough copy of Home Assistant's default theme variables. */
+      :root {
+        --primary-color: #03a9f4;
+        --text-primary-color: #fff;
+        --primary-text-color: #212121;
+        --secondary-text-color: #727272;
+        --primary-background-color: #fafafa;
+        --secondary-background-color: #e5e5e5;
+        --card-background-color: #fff;
+        --divider-color: rgba(0, 0, 0, 0.12);
+        --error-color: #db4437;
+        --warning-color: #ffa600;
+        --success-color: #43a047;
+      }
+      :root[data-theme="dark"] {
+        --primary-text-color: #e1e1e1;
+        --secondary-text-color: #9b9b9b;
+        --primary-background-color: #111;
+        --secondary-background-color: #282828;
+        --card-background-color: #1c1c1c;
+        --divider-color: rgba(225, 225, 225, 0.12);
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family: Roboto, system-ui, sans-serif;
+        background: var(--primary-background-color);
+        color: var(--primary-text-color);
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      .toolbar select,
+      .toolbar button {
+        font: inherit;
+        padding: 6px 10px;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+        gap: 24px;
+        align-items: start;
+      }
+      .panel {
+        background: var(--card-background-color);
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+      }
+      h2 {
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--secondary-text-color);
+        margin: 0 0 8px;
+      }
+      pre {
+        font-size: 0.8rem;
+        background: var(--secondary-background-color);
+        padding: 8px;
+        border-radius: 8px;
+        overflow-x: auto;
+        max-height: 240px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toolbar">
+      <label>
+        Scenario
+        <select id="scenario">
+          <option value="charging">Charging on solar</option>
+          <option value="boosting">Boosting from grid</option>
+          <option value="connected">Plugged in, waiting</option>
+          <option value="disconnected">Car unplugged</option>
+          <option value="fault">Fault</option>
+        </select>
+      </label>
+      <button id="theme">Toggle dark mode</button>
+    </div>
+
+    <div class="layout">
+      <div>
+        <h2>Card</h2>
+        <div id="card-slot"></div>
+        <h2 style="margin-top: 16px">Service calls</h2>
+        <pre id="log">(none yet: click the buttons on the card)</pre>
+      </div>
+      <div>
+        <h2>Card editor</h2>
+        <div class="panel" id="editor-slot"></div>
+        <h2 style="margin-top: 16px">Saved config</h2>
+        <pre id="config"></pre>
+      </div>
+    </div>
+
+    <script type="module">
+      // Stand-ins for the Home Assistant elements the card uses.
+      customElements.define(
+        "ha-card",
+        class extends HTMLElement {
+          constructor() {
+            super();
+            this.attachShadow({ mode: "open" }).innerHTML = `
+              <style>:host{display:block;background:var(--card-background-color);border-radius:12px;
+              box-shadow:0 1px 3px rgba(0,0,0,.15)}</style><slot></slot>`;
+          }
+        },
+      );
+
+      customElements.define(
+        "ha-icon",
+        class extends HTMLElement {
+          static observedAttributes = ["icon"];
+          constructor() {
+            super();
+            const root = this.attachShadow({ mode: "open" });
+            root.innerHTML = `
+              <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/MaterialDesign-Webfont/7.4.47/css/materialdesignicons.min.css">
+              <style>:host{display:inline-flex;line-height:1}i{font-size:var(--mdc-icon-size,24px)}</style><i></i>`;
+          }
+          set icon(value) {
+            this._icon = value;
+            this.shadowRoot.querySelector("i").className = `mdi ${String(value).replace("mdi:", "mdi-")}`;
+          }
+          get icon() {
+            return this._icon;
+          }
+          attributeChangedCallback(_name, _old, value) {
+            this.icon = value;
+          }
+        },
+      );
+
+      // ha-form only exists inside Home Assistant; list the fields it would show instead.
+      customElements.define(
+        "ha-form",
+        class extends HTMLElement {
+          set schema(schema) {
+            const names = [];
+            const walk = (items) =>
+              items.forEach((s) => (s.schema ? walk(s.schema) : names.push(s.name)));
+            walk(schema);
+            this.innerHTML = `<div style="padding:8px 12px;border:1px dashed var(--divider-color);
+              border-radius:8px;color:var(--secondary-text-color);font-size:.85rem">
+              Home Assistant form fields (only rendered inside HA):<br>${names.join(", ")}</div>`;
+          }
+        },
+      );
+
+      await import("../dist/zappi-card.js");
+
+      const SCENARIOS = {
+        charging: { mode: "Eco+", status: "Charging", plug: "Charging", charge: 4200, session: 6.3, grid: -350, solar: 5600, home: 1050 },
+        boosting: { mode: "Fast", status: "Boosting", plug: "Charging", charge: 7150, session: 12.8, grid: 7900, solar: 0, home: 750 },
+        connected: { mode: "Eco+", status: "Paused", plug: "EV Connected", charge: 0, session: 0, grid: 420, solar: 180, home: 600 },
+        disconnected: { mode: "Eco+", status: "Paused", plug: "EV Disconnected", charge: 0, session: 15.1, grid: -1800, solar: 2600, home: 800 },
+        fault: { mode: "Eco", status: "Paused", plug: "Fault", charge: 0, session: 0, grid: 300, solar: 0, home: 300 },
+      };
+
+      const IDS = {
+        mode: "select.myenergi_zappi_charge_mode",
+        status: "sensor.myenergi_zappi_status",
+        plug: "sensor.myenergi_zappi_plug_status",
+        charge: "sensor.myenergi_zappi_power_ct_internal_load",
+        session: "sensor.myenergi_zappi_charge_added_session",
+        grid: "sensor.myenergi_home_power_grid",
+        solar: "sensor.myenergi_home_power_generation",
+        home: "sensor.myenergi_home_home_consumption",
+      };
+
+      const entities = Object.fromEntries(
+        Object.entries(IDS).map(([key, id]) => [
+          id,
+          { entity_id: id, platform: "myenergi", device_id: ["grid", "solar", "home"].includes(key) ? "hub" : "zappi" },
+        ]),
+      );
+
+      let values = { ...SCENARIOS.charging };
+      let config = {
+        type: "custom:zappi-card",
+        entity: IDS.mode,
+        battery_soh_percent: 94,
+        max_charge_percent: 80,
+        calibration: [{ start_percent: 55, kwh: 15.1, end_percent: 81 }],
+      };
+      const log = [];
+
+      const buildHass = () => {
+        const states = {};
+        for (const [key, id] of Object.entries(IDS)) {
+          states[id] = { entity_id: id, state: String(values[key]), attributes: {}, last_changed: "", last_updated: "" };
+        }
+        states[IDS.mode].attributes = { friendly_name: "myenergi Zappi Charge Mode", options: ["Fast", "Eco", "Eco+", "Stopped"] };
+        return { states, entities, language: "en", callService };
+      };
+
+      async function callService(domain, service, data, target) {
+        log.unshift(`${domain}.${service} ${JSON.stringify(data)} → ${target?.entity_id}`);
+        document.getElementById("log").textContent = log.slice(0, 20).join("\n");
+        await new Promise((r) => setTimeout(r, 400));
+        if (service === "select_option") values.mode = data.option;
+        if (service === "myenergi_boost") Object.assign(values, { status: "Boosting", plug: "Charging", charge: 7150 });
+        if (service === "myenergi_stop_boost") Object.assign(values, { status: "Paused", charge: 0 });
+        refresh();
+      }
+
+      const card = document.createElement("zappi-card");
+      const editor = document.createElement("zappi-card-editor");
+      document.getElementById("card-slot").append(card);
+      document.getElementById("editor-slot").append(editor);
+
+      const applyConfig = () => {
+        card.setConfig(config);
+        editor.setConfig(config);
+        document.getElementById("config").textContent = JSON.stringify(config, null, 2);
+      };
+
+      function refresh() {
+        const hass = buildHass();
+        card.hass = hass;
+        editor.hass = hass;
+      }
+
+      editor.addEventListener("config-changed", (ev) => {
+        config = ev.detail.config;
+        applyConfig();
+      });
+
+      document.getElementById("scenario").addEventListener("change", (ev) => {
+        values = { ...SCENARIOS[ev.target.value] };
+        refresh();
+      });
+
+      document.getElementById("theme").addEventListener("click", () => {
+        const root = document.documentElement;
+        root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
+      });
+
+      applyConfig();
+      refresh();
+    </script>
+  </body>
+</html>

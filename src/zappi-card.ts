@@ -1,5 +1,6 @@
 import { LitElement, html, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { kwhForTarget, summarizeCalibration } from "./calibration";
 import { findChargeModeSelect, resolveEntities, type ZappiEntities } from "./entities";
 import { cardStyles } from "./styles";
 import type { HomeAssistant, LovelaceCardEditor, ZappiCardConfig } from "./types";
@@ -16,19 +17,31 @@ const MODE_ICONS: Record<string, string> = {
 
 const UNAVAILABLE = ["unavailable", "unknown"];
 
+// Boost amounts the myenergi integration accepts.
+const MIN_BOOST_KWH = 1;
+const MAX_BOOST_KWH = 99;
+
+/** "custom" uses the typed target; the others pin the target to a preset. */
+type TargetPreset = "custom" | "max" | "full";
+
+type BoostPlan = { kwh: number; from: number; to: number } | { problem: string };
+
 console.info(`%c ZAPPI-CARD %c ${CARD_VERSION} `, "color: white; background: #43a047", "");
 
 @customElement("zappi-card")
 export class ZappiCard extends LitElement {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @state() private _config!: ZappiCardConfig;
-  @state() private _boostKwh = 10;
+  @state() private _currentPercent = "";
+  @state() private _targetPercent = "";
+  @state() private _preset: TargetPreset = "custom";
   @state() private _boostBy = "07:00";
   @state() private _pending?: string;
   @state() private _error?: string;
 
   private _entities?: ZappiEntities;
   private _registry?: HomeAssistant["entities"];
+  private _kwhPerPercent?: number;
 
   static styles = cardStyles;
 
@@ -45,7 +58,8 @@ export class ZappiCard extends LitElement {
       throw new Error("Set 'entity' to the myenergi zappi charge mode select entity");
     }
     this._config = { show_power_flow: true, show_boost: true, ...config };
-    this._boostKwh = config.default_boost_kwh ?? this._boostKwh;
+    this._kwhPerPercent = summarizeCalibration(config.calibration).kwhPerPercent;
+    if (this._preset === "max" && config.max_charge_percent === undefined) this._preset = "custom";
     this._entities = undefined;
   }
 
@@ -91,24 +105,58 @@ export class ZappiCard extends LitElement {
     );
   }
 
-  private _boost(): void {
+  private _parsePercent(raw: string): number | undefined {
+    if (raw.trim() === "") return undefined;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  private _targetValue(): number | undefined {
+    const max = this._config.max_charge_percent;
+    if (this._preset === "max") return max;
+    if (this._preset === "full") return 100;
+    // An empty target means "charge to the max allowed", or full if no max is set.
+    return this._parsePercent(this._targetPercent) ?? max ?? 100;
+  }
+
+  /** Work out the kWh to boost, or why it can't be worked out. */
+  private _boostPlan(): BoostPlan {
+    const max = this._config.max_charge_percent;
+    const from = this._parsePercent(this._currentPercent);
+    const to = this._targetValue();
+    if (this._kwhPerPercent === undefined) {
+      return { problem: "Add calibration charges in the card settings to estimate kWh." };
+    }
+    if (from === undefined) return { problem: "Enter the current battery %." };
+    if (from < 0 || from > 100 || to === undefined || to < 0 || to > 100) {
+      return { problem: "Percentages must be between 0 and 100." };
+    }
+    // The 100% button is an explicit override of the max allowed.
+    if (this._preset === "custom" && max !== undefined && to > max) {
+      return { problem: `Target is above the max allowed (${max}%).` };
+    }
+    if (to <= from) return { problem: "Target must be higher than the current %." };
+    const kwh = Math.ceil(kwhForTarget(this._kwhPerPercent, from, to));
+    return { kwh: Math.min(MAX_BOOST_KWH, Math.max(MIN_BOOST_KWH, kwh)), from, to };
+  }
+
+  private _togglePreset(preset: TargetPreset): void {
+    this._preset = this._preset === preset ? "custom" : preset;
+  }
+
+  private _boost(kwh: number): void {
     void this._call("boost", () =>
-      this.hass.callService(
-        "myenergi",
-        "myenergi_boost",
-        { amount: this._boostKwh },
-        { entity_id: this._config.entity },
-      ),
+      this.hass.callService("myenergi", "myenergi_boost", { amount: kwh }, { entity_id: this._config.entity }),
     );
   }
 
-  private _smartBoost(): void {
+  private _smartBoost(kwh: number): void {
     void this._call("smart-boost", () =>
       this.hass.callService(
         "myenergi",
         "myenergi_smart_boost",
         // The integration strips ":" and expects HHMM, so drop any seconds.
-        { amount: this._boostKwh, when: this._boostBy.slice(0, 5) },
+        { amount: kwh, when: this._boostBy.slice(0, 5) },
         { entity_id: this._config.entity },
       ),
     );
@@ -261,23 +309,59 @@ export class ZappiCard extends LitElement {
 
   private _renderBoost(): TemplateResult {
     const busy = this._pending !== undefined;
-    const validKwh = this._boostKwh >= 1 && this._boostKwh <= 99;
+    const max = this._config.max_charge_percent;
+    const plan = this._boostPlan();
+    const kwh = "kwh" in plan ? plan.kwh : undefined;
+    const presetTarget = this._preset === "custom" ? undefined : this._targetValue();
+    const percentInput = (value: string, onInput: (v: string) => void, placeholder = "", disabled = false) => html`
+      <input
+        type="number"
+        inputmode="numeric"
+        min="0"
+        max="100"
+        step="1"
+        placeholder=${placeholder}
+        ?disabled=${disabled}
+        .value=${value}
+        @input=${(ev: Event) => onInput((ev.target as HTMLInputElement).value)}
+      />
+    `;
     return html`
       <div class="boost">
         <div class="section-label">Boost</div>
         <div class="boost-row">
           <label class="field">
-            <input
-              type="number"
-              min="1"
-              max="99"
-              step="1"
-              .value=${String(this._boostKwh)}
-              @change=${(ev: Event) => (this._boostKwh = Number((ev.target as HTMLInputElement).value))}
-            />
-            kWh
+            Now ${percentInput(this._currentPercent, (v) => (this._currentPercent = v))} %
           </label>
-          <button ?disabled=${busy || !validKwh} @click=${this._boost}>
+          <label class="field">
+            Target
+            ${percentInput(
+              presetTarget !== undefined ? String(presetTarget) : this._targetPercent,
+              (v) => (this._targetPercent = v),
+              String(max ?? 100),
+              presetTarget !== undefined,
+            )}
+            %
+          </label>
+          <button
+            class=${this._preset === "max" ? "selected" : ""}
+            ?disabled=${max === undefined}
+            title=${max === undefined ? "Set the max charge % in the card settings" : `Charge to ${max}%`}
+            @click=${() => this._togglePreset("max")}
+          >
+            Max allowed${max !== undefined ? ` (${max}%)` : ""}
+          </button>
+          <button class=${this._preset === "full" ? "selected" : ""} @click=${() => this._togglePreset("full")}>
+            100%
+          </button>
+        </div>
+        <div class="estimate ${"problem" in plan ? "problem" : ""}">
+          ${"problem" in plan
+            ? plan.problem
+            : html`≈ <strong>${plan.kwh} kWh</strong> to charge from ${plan.from}% to ${plan.to}%`}
+        </div>
+        <div class="boost-row">
+          <button ?disabled=${busy || kwh === undefined} @click=${() => kwh && this._boost(kwh)}>
             <ha-icon icon="mdi:rocket-launch"></ha-icon>Boost now
           </button>
         </div>
@@ -291,7 +375,10 @@ export class ZappiCard extends LitElement {
               @change=${(ev: Event) => (this._boostBy = (ev.target as HTMLInputElement).value)}
             />
           </label>
-          <button ?disabled=${busy || !validKwh || !this._boostBy} @click=${this._smartBoost}>
+          <button
+            ?disabled=${busy || kwh === undefined || !this._boostBy}
+            @click=${() => kwh && this._smartBoost(kwh)}
+          >
             <ha-icon icon="mdi:clock-fast"></ha-icon>Smart boost
           </button>
           <!-- Always offered: a scheduled smart boost reports "Paused", not "Boosting". -->

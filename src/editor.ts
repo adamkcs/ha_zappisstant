@@ -43,10 +43,6 @@ const DISPLAY_SCHEMA = [
       { name: "show_boost", selector: { boolean: {} } },
     ],
   },
-  {
-    name: "default_boost_kwh",
-    selector: { number: { min: 1, max: 99, mode: "box", unit_of_measurement: "kWh" } },
-  },
 ];
 
 const LABELS: Record<string, string> = {
@@ -54,7 +50,6 @@ const LABELS: Record<string, string> = {
   name: "Name",
   show_power_flow: "Show solar / grid / home power",
   show_boost: "Show boost controls",
-  default_boost_kwh: "Default boost amount",
   status_entity: "Status",
   plug_status_entity: "Plug status",
   charge_power_entity: "Charge power",
@@ -86,8 +81,44 @@ export class ZappiCardEditor extends LitElement {
         <h3>Display</h3>
         ${this._renderForm(DISPLAY_SCHEMA)}
       </div>
-      ${this._renderCalibration()}
+      ${this._renderBatteryHealth()} ${this._renderCalibration()}
     `;
+  }
+
+  private _renderBatteryHealth(): TemplateResult {
+    const field = (key: "battery_soh_percent" | "max_charge_percent", label: string, hint: string) => html`
+      <label class="health-field">
+        <span>${label}</span>
+        <span class="with-unit">
+          <input
+            type="number"
+            inputmode="numeric"
+            min="1"
+            max="100"
+            step="1"
+            .value=${this._config![key] === undefined ? "" : String(this._config![key])}
+            @change=${(ev: Event) => this._percentChanged(key, (ev.target as HTMLInputElement).value)}
+          />
+          %
+        </span>
+        <span class="hint">${hint}</span>
+      </label>
+    `;
+    return html`
+      <div class="section">
+        <h3>Battery health</h3>
+        <div class="health">
+          ${field("battery_soh_percent", "Last read SOH", "From the car or an OBD reader. Stored for later calculations.")}
+          ${field("max_charge_percent", "Max charge allowed", "Charges stop here unless you pick 100% on the card.")}
+        </div>
+      </div>
+    `;
+  }
+
+  private _percentChanged(key: "battery_soh_percent" | "max_charge_percent", raw: string): void {
+    const value = raw === "" ? undefined : Number(raw);
+    const valid = value !== undefined && Number.isFinite(value) && value >= 1 && value <= 100;
+    this._emit({ ...this._config, [key]: valid ? value : undefined });
   }
 
   private _renderForm(schema: unknown[]): TemplateResult {
@@ -196,6 +227,29 @@ export class ZappiCardEditor extends LitElement {
       margin: 0 0 12px;
       font-size: 0.875rem;
       color: var(--secondary-text-color);
+    }
+    .health {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 16px;
+    }
+    .health-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .health-field .hint {
+      margin: 0;
+      font-size: 0.8rem;
+      color: var(--secondary-text-color);
+    }
+    .with-unit {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .with-unit input {
+      width: 80px;
     }
     .slots {
       display: grid;

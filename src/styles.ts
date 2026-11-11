@@ -149,8 +149,21 @@ export const cardStyles = css`
     background: var(--card-background-color);
     color: var(--primary-text-color);
   }
+  input[type="number"] {
+    width: 56px;
+  }
   input[type="time"] {
     width: auto;
+  }
+  input:disabled {
+    opacity: 0.6;
+  }
+  .estimate {
+    font-size: 0.9rem;
+    color: var(--primary-text-color);
+  }
+  .estimate.problem {
+    color: var(--secondary-text-color);
   }
   .error {
     color: var(--error-color);
