@@ -207,8 +207,40 @@
           states[id] = { entity_id: id, state: String(values[key]), attributes: {}, last_changed: "", last_updated: "" };
         }
         states[IDS.mode].attributes = { friendly_name: "myenergi Zappi Charge Mode", options: ["Fast", "Eco", "Eco+", "Stopped"] };
-        return { states, entities, language: "en", callService };
+        states[SCHEDULE_STATUS] = {
+          entity_id: SCHEDULE_STATUS,
+          state: schedule.enabled ? "waiting" : "disabled",
+          attributes: { planned_kwh: 21, delivered_kwh: 0, next_interval: { start: "22:00", end: "24:00" } },
+        };
+        return { states, entities, language: "en", callService, callWS };
       };
+
+      // Mock of the Zappistant integration's websocket API.
+      const SCHEDULE_STATUS = "sensor.zappi_schedule_status";
+      entities[SCHEDULE_STATUS] = { entity_id: SCHEDULE_STATUS, platform: "zappistant", device_id: "schedule" };
+      const day = (patch = {}) => ({
+        enabled: false, start_percent: null, target_percent: null, kwh: null, kwh_manual: false, intervals: [], ...patch,
+      });
+      let schedule = {
+        enabled: true,
+        days: [
+          day(),
+          day({ enabled: true, start_percent: 45, target_percent: 80, kwh: 21, intervals: [{ start: "22:00", end: "24:00", overrun: false }] }),
+          day({ enabled: true, start_percent: 45, target_percent: 100, kwh: 32, intervals: [{ start: "00:00", end: "05:00", overrun: false }, { start: "22:00", end: "24:00", overrun: true }] }),
+          day(), day(), day(), day(),
+        ],
+      };
+
+      async function callWS(msg) {
+        log.unshift(`ws ${msg.type}`);
+        document.getElementById("log").textContent = log.slice(0, 20).join("\n");
+        await new Promise((r) => setTimeout(r, 300));
+        if (msg.type === "zappistant/schedule/save") {
+          schedule = structuredClone(msg.schedule);
+          refresh();
+        }
+        return { schedule: structuredClone(schedule), status: {} };
+      }
 
       async function callService(domain, service, data, target) {
         log.unshift(`${domain}.${service} ${JSON.stringify(data)} → ${target?.entity_id}`);

@@ -24,6 +24,7 @@ export interface HomeAssistant {
     serviceData?: Record<string, unknown>,
     target?: { entity_id?: string | string[] },
   ): Promise<unknown>;
+  callWS<T>(message: { type: string; [key: string]: unknown }): Promise<T>;
 }
 
 export interface ZappiCardConfig {

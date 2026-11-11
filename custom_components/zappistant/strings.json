@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Zappi schedule",
+        "description": "Pick the myenergi zappi charge mode entity. Its sensors are found automatically; only pick them if setup says it couldn't find them.",
+        "data": {
+          "mode_entity": "Charge mode entity",
+          "session_entity": "Charge added session sensor",
+          "plug_entity": "Plug status sensor",
+          "status_entity": "Status sensor",
+          "switch_to_stopped": "Switch to Stopped when a scheduled charge starts"
+        }
+      }
+    },
+    "error": {
+      "sensors_not_found": "Couldn't find all of the zappi's sensors from the charge mode entity. Pick the missing ones."
+    },
+    "abort": {
+      "single_instance_allowed": "Zappistant is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "switch_to_stopped": "Switch to Stopped when a scheduled charge starts"
+        },
+        "data_description": {
+          "switch_to_stopped": "Without this the zappi keeps charging in its own mode outside your slots."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "schedule_status": {
+        "name": "Status",
+        "state": {
+          "disabled": "Disabled",
+          "idle": "Idle",
+          "waiting": "Waiting for next slot",
+          "charging": "Charging",
+          "overrun": "Charging past slot",
+          "done": "Done",
+          "ended": "Ended before target"
+        }
+      }
+    },
+    "switch": {
+      "schedule_enabled": {
+        "name": "Enabled"
+      }
+    }
+  }
+}

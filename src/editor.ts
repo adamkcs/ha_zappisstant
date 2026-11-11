@@ -1,7 +1,9 @@
 import { LitElement, css, html, nothing, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { CALIBRATION_SLOTS, evaluateSlot, summarizeCalibration } from "./calibration";
+import { findScheduleStatus } from "./entities";
 import type { CalibrationSlot, HomeAssistant, ZappiCardConfig } from "./types";
+import "./schedule-editor";
 
 const sensor = (name: string, deviceClass?: string) => ({
   name,
@@ -82,6 +84,32 @@ export class ZappiCardEditor extends LitElement {
         ${this._renderForm(DISPLAY_SCHEMA)}
       </div>
       ${this._renderBatteryHealth()} ${this._renderTargetCharging()} ${this._renderCalibration()}
+      ${this._renderSchedule()}
+    `;
+  }
+
+  private _renderSchedule(): TemplateResult {
+    // The schedule lives in the Zappistant integration, not in this card's config.
+    const installed = findScheduleStatus(this.hass!) !== undefined;
+    return html`
+      <div class="section">
+        <h3>Weekly schedule</h3>
+        ${installed
+          ? html`
+              <p class="hint">
+                Saved straight to Home Assistant with the schedule's own Save button, separately from this card's
+                settings. kWh is calculated from the battery calibration above.
+              </p>
+              <zappi-schedule-editor
+                .hass=${this.hass}
+                .kwhPerPercent=${summarizeCalibration(this._config!.calibration).kwhPerPercent}
+              ></zappi-schedule-editor>
+            `
+          : html`<p class="hint">
+              Install the Zappistant integration (in this repository's <code>custom_components</code>) to plan
+              charging slots for each day of the week.
+            </p>`}
+      </div>
     `;
   }
 

@@ -86,6 +86,13 @@ export function resolveEntities(hass: HomeAssistant, config: ZappiCardConfig): Z
   };
 }
 
+/** The Zappistant schedule status sensor, if the companion integration is installed. */
+export function findScheduleStatus(hass: HomeAssistant): string | undefined {
+  return Object.values(hass.entities ?? {}).find(
+    (e) => e.platform === "zappistant" && e.entity_id.startsWith("sensor."),
+  )?.entity_id;
+}
+
 /** Find the first myenergi zappi charge mode select, used for the card stub. */
 export function findChargeModeSelect(hass: HomeAssistant): string | undefined {
   return Object.keys(hass.states).find(
