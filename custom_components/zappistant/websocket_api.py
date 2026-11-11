@@ -8,9 +8,11 @@ import voluptuous as vol
 
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN
 from .controller import ScheduleController
+from .planner import BOOST_MANUAL, BOOST_SMART
 
 
 @callback
@@ -18,6 +20,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_schedule)
     websocket_api.async_register_command(hass, ws_save_schedule)
     websocket_api.async_register_command(hass, ws_set_override)
+    websocket_api.async_register_command(hass, ws_boost)
+    websocket_api.async_register_command(hass, ws_stop_boost)
 
 
 def _controller(
@@ -53,6 +57,48 @@ async def ws_save_schedule(
         connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
         return
     connection.send_result(msg["id"], {"schedule": schedule, "status": controller.status()})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "zappistant/boost",
+        vol.Required("kind"): vol.In([BOOST_MANUAL, BOOST_SMART]),
+        vol.Required("kwh"): vol.All(vol.Coerce(float), vol.Range(min=1, max=99)),
+        vol.Optional("ready_by"): str,
+        vol.Optional("switch_to_stopped", default=False): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_boost(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Start a boost through Zappistant, so it shows up in the charging plan."""
+    if not (controller := _controller(hass, connection, msg)):
+        return
+    try:
+        await controller.async_boost(msg["kind"], msg["kwh"], msg.get("ready_by"), msg["switch_to_stopped"])
+    except ValueError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_INVALID_FORMAT, str(err))
+        return
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_HOME_ASSISTANT_ERROR, str(err))
+        return
+    connection.send_result(msg["id"], {"status": controller.status()})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "zappistant/boost/stop"})
+@websocket_api.async_response
+async def ws_stop_boost(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    if not (controller := _controller(hass, connection, msg)):
+        return
+    try:
+        await controller.async_stop_boost()
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], websocket_api.ERR_HOME_ASSISTANT_ERROR, str(err))
+        return
+    connection.send_result(msg["id"], {"status": controller.status()})
 
 
 @websocket_api.websocket_command(

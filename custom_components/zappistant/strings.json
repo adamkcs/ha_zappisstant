@@ -9,7 +9,11 @@
           "session_entity": "Charge added session sensor",
           "plug_entity": "Plug status sensor",
           "status_entity": "Status sensor",
-          "switch_to_stopped": "Switch to Stopped when a scheduled charge starts"
+          "switch_to_stopped": "Switch to Stopped when a scheduled charge starts",
+          "charge_rate": "Charging power (kW)"
+        },
+        "data_description": {
+          "charge_rate": "Used to estimate charging slots for Predbat. 7.0 for a single-phase zappi, 22.0 for three-phase."
         }
       }
     },
@@ -24,10 +28,12 @@
     "step": {
       "init": {
         "data": {
-          "switch_to_stopped": "Switch to Stopped when a scheduled charge starts"
+          "switch_to_stopped": "Switch to Stopped when a scheduled charge starts",
+          "charge_rate": "Charging power (kW)"
         },
         "data_description": {
-          "switch_to_stopped": "Without this the zappi keeps charging in its own mode outside your slots."
+          "switch_to_stopped": "Without this the zappi keeps charging in its own mode outside your slots.",
+          "charge_rate": "Used to estimate charging slots for Predbat. 7.0 for a single-phase zappi, 22.0 for three-phase."
         }
       }
     }
@@ -50,6 +56,11 @@
     "switch": {
       "schedule_enabled": {
         "name": "Enabled"
+      }
+    },
+    "binary_sensor": {
+      "charge_slot": {
+        "name": "Charge slot"
       }
     }
   }

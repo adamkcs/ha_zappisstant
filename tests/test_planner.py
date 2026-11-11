@@ -250,5 +250,80 @@ class OverrideTest(unittest.TestCase):
         self.assertIsNone(planner.upcoming(self.schedule, at(10, 18)))
 
 
+class PlannedSlotsTest(unittest.TestCase):
+    """Charging slots published for Predbat, at 7 kW."""
+
+    RATE = 7.0
+
+    def slots(self, schedule, now, run=None, boosts=None):
+        return [
+            (start.strftime("%d %H:%M"), end.strftime("%d %H:%M"), round(kwh, 2))
+            for start, end, kwh in planner.planned_slots(schedule, run, now, self.RATE, boosts=boosts)
+        ]
+
+    def test_fills_windows_in_order_until_kwh(self):
+        # 10 kWh at 7 kW: the first 2-hour window takes it all, ending after 1h26m.
+        schedule = schedule_with(TUESDAY, [{"start": "01:00", "end": "03:00"}, {"start": "22:00", "end": "24:00"}])
+        self.assertEqual(self.slots(schedule, at(10, 0)), [("10 01:00", "10 02:25", 10.0)])
+
+    def test_spills_into_later_windows(self):
+        schedule = schedule_with(
+            TUESDAY, [{"start": "01:00", "end": "02:00"}, {"start": "22:00", "end": "24:00"}], kwh=10
+        )
+        self.assertEqual(
+            self.slots(schedule, at(10, 0)), [("10 01:00", "10 02:00", 7.0), ("10 22:00", "10 22:25", 3.0)]
+        )
+
+    def test_overrun_extends_past_window(self):
+        schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "23:00", "overrun": True}], kwh=10)
+        self.assertEqual(
+            self.slots(schedule, at(10, 12)), [("10 22:00", "10 23:00", 7.0), ("10 23:00", "10 23:25", 3.0)]
+        )
+
+    def test_running_charge_uses_remaining_kwh_from_now(self):
+        schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "24:00"}], kwh=10)
+        run = planner.Run(date="2026-11-10", kwh=10, delivered=6.5)
+        self.assertEqual(self.slots(schedule, at(10, 22, 30), run), [("10 22:30", "10 23:00", 3.5)])
+
+    def test_running_overrun_past_its_window(self):
+        schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "23:00", "overrun": True}], kwh=10)
+        run = planner.Run(date="2026-11-10", kwh=10, delivered=7)
+        self.assertEqual(self.slots(schedule, at(10, 23, 30), run), [("10 23:30", "10 23:55", 3.0)])
+
+    def test_overnight_charge_and_window_limit(self):
+        # Tuesday 22:00 to Wednesday 05:00 is one 30 kWh charge: 4h17m at 7 kW, across midnight.
+        schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "24:00"}], kwh=30)
+        schedule["days"][TUESDAY + 1] = {
+            **planner.empty_day(),
+            "enabled": True,
+            "intervals": [{"start": "00:00", "end": "05:00", "overrun": False}],
+        }
+        self.assertEqual(self.slots(schedule, at(10, 12)), [("10 22:00", "11 02:17", 30.0)])
+        # Without the morning slot only 2 hours fit, so only 14 kWh is planned.
+        schedule["days"][TUESDAY + 1]["enabled"] = False
+        self.assertEqual(self.slots(schedule, at(10, 12)), [("10 22:00", "11 00:00", 14.0)])
+
+    def test_nothing_when_disabled(self):
+        schedule = schedule_with(TUESDAY, [{"start": "22:00", "end": "24:00"}], enabled=False)
+        self.assertEqual(self.slots(schedule, at(10, 12)), [])
+
+    def test_boosts(self):
+        schedule = planner.empty_schedule()
+        now = at(10, 18)
+        manual = planner.Boost(kind=planner.BOOST_MANUAL, kwh=7, started=now.isoformat())
+        smart = planner.Boost(
+            kind=planner.BOOST_SMART, kwh=14, started=now.isoformat(),
+            ready_by=planner.ready_by_time(now, "07:00").isoformat(),
+        )
+        self.assertEqual(
+            self.slots(schedule, now, boosts=[manual, smart]),
+            [("10 18:00", "10 19:00", 7.0), ("11 05:00", "11 07:00", 14.0)],
+        )
+        manual.track(0.0)
+        manual.track(7.0)
+        self.assertTrue(manual.finished(now))
+        self.assertTrue(smart.finished(at(11, 7)))
+
+
 if __name__ == "__main__":
     unittest.main()

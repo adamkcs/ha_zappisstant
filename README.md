@@ -127,8 +127,43 @@ to recalculate the kWh from your calibration and press **Apply**: that adjusts o
 and leaves the weekly plan as it is. 0 kWh (start at or above the target) skips the charge.
 **Use weekly plan** removes the adjustment.
 
-Zappistant adds `sensor.zappi_schedule_status` (with progress attributes) and
-`switch.zappi_schedule_enabled` to turn the whole schedule on or off.
+Zappistant adds `sensor.zappi_schedule_status` (with progress attributes),
+`switch.zappi_schedule_enabled` to turn the whole schedule on or off, and
+`binary_sensor.zappi_schedule_charge_slot` for Predbat (below).
+
+### Predbat
+
+Zappistant publishes its charging plan in the format [Predbat](https://springfall2008.github.io/batpred/)
+reads planned car charging from, so Predbat can plan the house battery around it.
+`binary_sensor.zappi_schedule_charge_slot` is on during a planned charge, and its
+`planned_dispatches` attribute lists the next 48 hours:
+
+- **Schedule**: each upcoming charge split over its slots at the configured charging power
+  (an integration option, 7 kW by default), trimmed to the kWh still needed, and extended past a
+  slot's end when "keep charging after" is on.
+- **Boost now** (from the card): from now until the kWh is in.
+- **Smart boost** (from the card): myenergi doesn't say when it will charge, so it's estimated as
+  the latest block that finishes by the "Ready by" time.
+
+Boosts are dropped from the plan once delivered, when the car is unplugged, when you press Stop boost,
+or when the ready-by time passes. Boosts started outside the card (e.g. the myenergi app) aren't in
+the plan; Predbat only sees them once the car is charging.
+
+Each slot has the source `charger-schedule`, which Predbat treats as car load only, never as a
+cheap tariff slot. In Predbat's `apps.yaml`:
+
+```yaml
+num_cars: 1
+octopus_intelligent_slot: binary_sensor.zappi_schedule_charge_slot
+```
+
+Keep Predbat's own zappi control (`myenergi_zappi_control`) off, or it will switch the zappi
+between Fast and Stopped against Zappistant. Predbat's myenergi support (or `car_charging_now` and
+`car_charging_energy` pointed at the zappi's plug status and session energy) still covers a car that
+is charging right now and keeps car energy out of the house load history.
+
+On **Intelligent Octopus Go**, `octopus_intelligent_slot` is for Octopus's own dispatch sensor and
+Octopus schedules the charging, so this setup needs revisiting before switching tariff.
 
 ## Development
 

@@ -70,6 +70,15 @@ export const setOverride = (
   override: { kwh: number; start_percent: number } | null,
 ) => hass.callWS<{ status: ScheduleStatus }>({ type: "zappistant/override/set", date, ...override });
 
+/** Start a boost through Zappistant, which adds it to the charging plan it publishes. */
+export const zappistantBoost = (
+  hass: HomeAssistant,
+  boost: { kind: "manual" | "smart"; kwh: number; ready_by?: string; switch_to_stopped: boolean },
+) => hass.callWS<{ status: ScheduleStatus }>({ type: "zappistant/boost", ...boost });
+
+export const zappistantStopBoost = (hass: HomeAssistant) =>
+  hass.callWS<{ status: ScheduleStatus }>({ type: "zappistant/boost/stop" });
+
 /** "HH:MM" for a half-hour slot index, with 48 meaning "24:00". */
 export function slotTime(slot: number): string {
   const minutes = slot * 30;

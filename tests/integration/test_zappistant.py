@@ -29,6 +29,7 @@ SESSION = "sensor.myenergi_zappi_charge_added_session"
 PLUG = "sensor.myenergi_zappi_plug_status"
 STATUS = "sensor.myenergi_zappi_status"
 SCHEDULE_STATUS = "sensor.zappi_schedule_status"
+CHARGE_SLOT = "binary_sensor.zappi_schedule_charge_slot"
 
 # 2026-11-10 is a Tuesday.
 TUESDAY = 1
@@ -67,6 +68,7 @@ async def setup(hass: HomeAssistant, freezer: FrozenDateTimeFactory, hass_ws_cli
         "select": async_mock_service(hass, "select", "select_option"),
         "boost": async_mock_service(hass, "myenergi", "myenergi_boost"),
         "stop": async_mock_service(hass, "myenergi", "myenergi_stop_boost"),
+        "smart": async_mock_service(hass, "myenergi", "myenergi_smart_boost"),
     }
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -182,6 +184,67 @@ async def test_override_adjusts_upcoming_charge(
 
     await client.send_json_auto_id({"type": "zappistant/override/set", "date": "not-a-date", "kwh": 5})
     assert not (await client.receive_json())["success"]
+
+
+async def test_charge_slot_sensor_for_predbat(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, setup
+) -> None:
+    _calls, save, _client = setup
+    await save(_schedule([{"start": "22:00", "end": "24:00"}], kwh=10))
+    state = hass.states.get(CHARGE_SLOT)
+    assert state.state == "off"
+    assert state.attributes["planned_dispatches"] == [
+        {
+            "start": "2026-11-10T22:00:00+00:00",
+            "end": "2026-11-10T23:25:42+00:00",
+            "charge_in_kwh": 10.0,
+            "source": "charger-schedule",
+            "location": "AT_HOME",
+        }
+    ]
+    assert state.attributes["charge_point_power_in_kw"] == 7.0
+
+    await _move_to(hass, freezer, datetime(2026, 11, 10, 22, 0, 30, tzinfo=dt_util.UTC))
+    assert hass.states.get(CHARGE_SLOT).state == "on"
+
+
+async def test_boosts_through_zappistant_join_the_plan(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, setup
+) -> None:
+    calls, _save, client = setup
+    await client.send_json_auto_id(
+        {"type": "zappistant/boost", "kind": "smart", "kwh": 14, "ready_by": "07:00", "switch_to_stopped": True}
+    )
+    assert (await client.receive_json())["success"]
+    assert [c.data["option"] for c in calls["select"]] == ["Stopped"]
+    assert calls["smart"][0].data["amount"] == 14
+    assert calls["smart"][0].data["when"] == "07:00"
+    dispatches = hass.states.get(CHARGE_SLOT).attributes["planned_dispatches"]
+    assert [(d["start"], d["end"], d["charge_in_kwh"]) for d in dispatches] == [
+        ("2026-11-11T05:00:00+00:00", "2026-11-11T07:00:00+00:00", 14.0)
+    ]
+
+    # Boost now replaces it and plans from now; stopping clears the plan.
+    await client.send_json_auto_id({"type": "zappistant/boost", "kind": "manual", "kwh": 7})
+    assert (await client.receive_json())["success"]
+    assert calls["boost"][0].data["amount"] == 7
+    dispatches = hass.states.get(CHARGE_SLOT).attributes["planned_dispatches"]
+    assert [(d["start"], d["end"]) for d in dispatches] == [("2026-11-10T21:50:00+00:00", "2026-11-10T22:50:00+00:00")]
+    assert hass.states.get(CHARGE_SLOT).state == "on"
+
+    await client.send_json_auto_id({"type": "zappistant/boost/stop"})
+    assert (await client.receive_json())["success"]
+    assert len(calls["stop"]) == 1
+    assert hass.states.get(CHARGE_SLOT).attributes["planned_dispatches"] == []
+
+
+async def test_boost_dropped_when_unplugged(hass: HomeAssistant, setup) -> None:
+    _calls, _save, client = setup
+    await client.send_json_auto_id({"type": "zappistant/boost", "kind": "manual", "kwh": 7})
+    assert (await client.receive_json())["success"]
+    _set_charger(hass, plug="EV Disconnected")
+    await hass.async_block_till_done()
+    assert hass.states.get(CHARGE_SLOT).attributes["planned_dispatches"] == []
 
 
 async def test_schedule_switch(hass: HomeAssistant, setup) -> None:

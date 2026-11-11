@@ -12,7 +12,7 @@ from .const import DOMAIN
 from .controller import ScheduleController
 from .websocket_api import async_register_websocket_commands
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.SWITCH]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type ZappistantConfigEntry = ConfigEntry[ScheduleController]

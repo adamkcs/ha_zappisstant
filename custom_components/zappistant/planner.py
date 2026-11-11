@@ -18,7 +18,7 @@ delivered since its first window began.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 DAYS = 7
@@ -251,6 +251,18 @@ def next_interval(schedule: dict[str, Any], now: datetime, overrides: Overrides 
     return next((w.as_interval() for w in windows if w.start > minute), None)
 
 
+def _count_session(tracker: Run | Boost, session_kwh: float | None) -> None:
+    """Add energy the session counter gained since last time. It resets when the car is
+    plugged in again, in which case everything it shows is new."""
+    if session_kwh is None:
+        return
+    if tracker.last_session is not None:
+        tracker.delivered += (
+            session_kwh - tracker.last_session if session_kwh >= tracker.last_session else session_kwh
+        )
+    tracker.last_session = session_kwh
+
+
 @dataclass
 class Run:
     """Progress of one day's charge."""
@@ -266,6 +278,122 @@ class Run:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+BOOST_MANUAL = "manual"
+BOOST_SMART = "smart"
+
+
+@dataclass
+class Boost:
+    """A boost started from the card, tracked so it can be shown in the charging plan."""
+
+    kind: str
+    kwh: float
+    started: str
+    # Smart boost only: when the charge must be finished.
+    ready_by: str | None = None
+    delivered: float = 0.0
+    last_session: float | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Boost:
+        return cls(**data)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self.kwh - self.delivered)
+
+    def track(self, session_kwh: float | None) -> None:
+        _count_session(self, session_kwh)
+
+    def finished(self, now: datetime) -> bool:
+        if self.remaining <= DONE_TOLERANCE_KWH:
+            return True
+        return self.ready_by is not None and now >= datetime.fromisoformat(self.ready_by)
+
+    def slot(self, now: datetime, rate_kw: float) -> tuple[datetime, datetime, float] | None:
+        """When this boost is expected to charge, as (start, end, kWh)."""
+        if self.finished(now):
+            return None
+        duration = timedelta(hours=self.remaining / rate_kw)
+        if self.ready_by is not None:
+            # myenergi doesn't say when a smart boost will charge; assume as late as it can.
+            ready_by = datetime.fromisoformat(self.ready_by)
+            start = max(now, ready_by - duration)
+            return start, start + duration, self.remaining
+        return now, now + duration, self.remaining
+
+
+def ready_by_time(now: datetime, value: str) -> datetime:
+    """The next time "HH:MM" comes round: today, or tomorrow if it has already passed."""
+    hours, minutes = (int(part) for part in value.split(":")[:2])
+    when = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+    return when if when > now else when + timedelta(days=1)
+
+
+def _window_datetimes(day: date, window: Window, tzinfo: Any) -> tuple[datetime, datetime]:
+    midnight = datetime.combine(day, time(), tzinfo=tzinfo)
+    return midnight + timedelta(minutes=window.start), midnight + timedelta(minutes=window.end)
+
+
+def _charge_slots(
+    day: date, windows: list[Window], kwh: float, now: datetime, rate_kw: float, in_progress: bool
+) -> list[tuple[datetime, datetime, float]]:
+    """Split a charge's kWh over its windows, charging at full rate from the start of each one.
+
+    in_progress: the charge's run has started, so an overrun window that has already ended
+    means it is charging past its slot right now.
+    """
+    slots = []
+    remaining = kwh
+    for window in windows:
+        if remaining <= DONE_TOLERANCE_KWH:
+            break
+        start, end = _window_datetimes(day, window, now.tzinfo)
+        if end <= now:
+            if window.overrun and in_progress:
+                # Past an overrun window: kWh, not time, decides; it keeps charging from now.
+                slots.append((now, now + timedelta(hours=remaining / rate_kw), remaining))
+                break
+            continue
+        start = max(start, now)
+        kwh_here = min(remaining, rate_kw * (end - start).total_seconds() / 3600)
+        slots.append((start, start + timedelta(hours=kwh_here / rate_kw), kwh_here))
+        remaining -= kwh_here
+        if window.overrun and remaining > DONE_TOLERANCE_KWH:
+            slots.append((end, end + timedelta(hours=remaining / rate_kw), remaining))
+            break
+    return slots
+
+
+def planned_slots(
+    schedule: dict[str, Any],
+    run: Run | None,
+    now: datetime,
+    rate_kw: float,
+    overrides: Overrides | None = None,
+    boosts: list[Boost] | None = None,
+    horizon: timedelta = timedelta(hours=48),
+) -> list[tuple[datetime, datetime, float]]:
+    """Expected charging over the coming hours, from the schedule and tracked boosts, as (start, end, kWh)."""
+    slots: list[tuple[datetime, datetime, float]] = []
+    if schedule["enabled"]:
+        for offset in range(-1, horizon.days + 2):
+            day = now.date() + timedelta(days=offset)
+            charge = day_charge(schedule, day, overrides)
+            if charge is None:
+                continue
+            in_progress = run is not None and run.date == day.isoformat()
+            kwh = max(0.0, run.kwh - run.delivered) if in_progress else charge["kwh"]  # type: ignore[union-attr]
+            slots += _charge_slots(day, charge["windows"], kwh, now, rate_kw, in_progress)
+    for boost in boosts or []:
+        if slot := boost.slot(now, rate_kw):
+            slots.append(slot)
+    return sorted(s for s in slots if s[0] < now + horizon and s[1] > s[0])
 
 
 @dataclass
@@ -305,14 +433,7 @@ def advance(
     if run is None:
         return None, Decision(STATE_IDLE)
 
-    # Count energy added since the run began. The session counter resets when the car is
-    # plugged in again, in which case everything it shows is new.
-    if session_kwh is not None:
-        if run.last_session is not None:
-            run.delivered += (
-                session_kwh - run.last_session if session_kwh >= run.last_session else session_kwh
-            )
-        run.last_session = session_kwh
+    _count_session(run, session_kwh)
 
     run_date = date.fromisoformat(run.date)
     charge = day_charge(schedule, run_date, overrides)

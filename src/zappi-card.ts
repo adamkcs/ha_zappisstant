@@ -2,7 +2,14 @@ import { LitElement, html, nothing, type PropertyValues, type TemplateResult } f
 import { customElement, property, state } from "lit/decorators.js";
 import { kwhForTarget, summarizeCalibration } from "./calibration";
 import { findChargeModeSelect, findScheduleStatus, resolveEntities, type ZappiEntities } from "./entities";
-import { DAY_NAMES, setOverride, type ScheduleStatus, type UpcomingCharge } from "./schedule";
+import {
+  DAY_NAMES,
+  setOverride,
+  zappistantBoost,
+  zappistantStopBoost,
+  type ScheduleStatus,
+  type UpcomingCharge,
+} from "./schedule";
 import { cardStyles } from "./styles";
 import type { HomeAssistant, LovelaceCardEditor, ZappiCardConfig } from "./types";
 import "./editor";
@@ -188,6 +195,17 @@ export class ZappiCard extends LitElement {
   private _startBoost(kind: "boost" | "smart-boost", kwh: number): void {
     const target = { entity_id: this._config.entity };
     void this._call(kind, async () => {
+      // With Zappistant installed it starts the boost, so the boost is part of the charging plan
+      // it publishes (e.g. for Predbat).
+      if (findScheduleStatus(this.hass)) {
+        await zappistantBoost(this.hass, {
+          kind: kind === "boost" ? "manual" : "smart",
+          kwh,
+          ready_by: kind === "boost" ? undefined : this._boostBy.slice(0, 5),
+          switch_to_stopped: this._willSwitchToStopped(),
+        });
+        return;
+      }
       // Set the mode first: changing mode afterwards could cancel the boost.
       if (this._willSwitchToStopped()) {
         await this.hass.callService("select", "select_option", { option: "Stopped" }, target);
@@ -208,7 +226,9 @@ export class ZappiCard extends LitElement {
 
   private _stopBoost(): void {
     void this._call("stop-boost", () =>
-      this.hass.callService("myenergi", "myenergi_stop_boost", {}, { entity_id: this._config.entity }),
+      findScheduleStatus(this.hass)
+        ? zappistantStopBoost(this.hass)
+        : this.hass.callService("myenergi", "myenergi_stop_boost", {}, { entity_id: this._config.entity }),
     );
   }
 

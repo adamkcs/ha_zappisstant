@@ -18,21 +18,29 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_CHARGE_RATE,
     CONF_MODE_ENTITY,
     CONF_PLUG_ENTITY,
     CONF_SESSION_ENTITY,
     CONF_STATUS_ENTITY,
     CONF_SWITCH_TO_STOPPED,
+    DEFAULT_CHARGE_RATE,
+    DISPATCH_SOURCE,
     DOMAIN,
     MYENERGI_DOMAIN,
 )
 from .planner import (
+    BOOST_MANUAL,
+    BOOST_SMART,
     STATE_DISABLED,
+    Boost,
     Decision,
     Run,
     advance,
     empty_schedule,
     next_interval,
+    planned_slots,
+    ready_by_time,
     upcoming,
     validate_override,
     validate_schedule,
@@ -47,6 +55,8 @@ BOOST_RETRY = timedelta(minutes=5)
 MIN_BOOST_KWH = 1
 MAX_BOOST_KWH = 99
 UNPLUGGED = {"", "EV Disconnected"}
+# A boost now that the zappi hasn't been running for this long has finished or been stopped.
+MANUAL_BOOST_GRACE = timedelta(minutes=10)
 
 
 class ScheduleController:
@@ -61,7 +71,12 @@ class ScheduleController:
         self.switch_to_stopped: bool = entry.options.get(
             CONF_SWITCH_TO_STOPPED, entry.data.get(CONF_SWITCH_TO_STOPPED, True)
         )
+        self.charge_rate: float = entry.options.get(
+            CONF_CHARGE_RATE, entry.data.get(CONF_CHARGE_RATE, DEFAULT_CHARGE_RATE)
+        )
         self.schedule: dict[str, Any] = empty_schedule()
+        # Boosts started from the card, kept so the charging plan includes them.
+        self.boosts: list[Boost] = []
         # One-off adjustments keyed by ISO date, e.g. a different start % for one evening.
         self.overrides: dict[str, dict[str, Any]] = {}
         self.run: Run | None = None
@@ -82,6 +97,7 @@ class ScheduleController:
             except (ValueError, KeyError, TypeError):
                 _LOGGER.warning("Stored schedule is invalid, starting with an empty one")
         self.overrides = data.get("overrides") or {}
+        self.boosts = [Boost.from_dict(boost) for boost in data.get("boosts") or []]
         self.run = Run.from_dict(data.get("run"))
         self._boost_started = data.get("boost_started", False)
 
@@ -121,6 +137,72 @@ class ScheduleController:
             self.overrides[day] = validate_override(override)
         await self.async_update()
 
+    async def async_boost(
+        self, kind: str, kwh: float, ready_by: str | None = None, switch_to_stopped: bool = False
+    ) -> None:
+        """Start a boost now or a smart boost, and add it to the charging plan."""
+        now = dt_util.now()
+        if switch_to_stopped and self._state(self.mode_entity) not in (None, "Stopped"):
+            await self._async_call("select", "select_option", {"option": "Stopped"})
+        if kind == BOOST_SMART:
+            if not ready_by:
+                raise ValueError("Smart boost needs a ready-by time")
+            deadline = ready_by_time(now, ready_by)
+            await self._async_call(
+                MYENERGI_DOMAIN, "myenergi_smart_boost", {"amount": kwh, "when": deadline.strftime("%H:%M")}
+            )
+        else:
+            deadline = None
+            await self._async_call(MYENERGI_DOMAIN, "myenergi_boost", {"amount": kwh})
+        # A new boost replaces the zappi's previous one.
+        self.boosts = [
+            Boost(
+                kind=kind,
+                kwh=kwh,
+                started=now.isoformat(),
+                ready_by=deadline.isoformat() if deadline else None,
+                last_session=self._float_state(self.session_entity),
+            )
+        ]
+        await self.async_update()
+
+    async def async_stop_boost(self) -> None:
+        await self._async_call(MYENERGI_DOMAIN, "myenergi_stop_boost", {})
+        self.boosts = []
+        await self.async_update()
+
+    def planned_dispatches(self) -> list[dict[str, Any]]:
+        """Expected charging in the format Predbat reads from a car charging slot sensor."""
+        slots = planned_slots(
+            self.schedule, self.run, dt_util.now(), self.charge_rate, self.overrides, self.boosts
+        )
+        return [
+            {
+                "start": start.isoformat(timespec="seconds"),
+                "end": end.isoformat(timespec="seconds"),
+                "charge_in_kwh": round(kwh, 2),
+                "source": DISPATCH_SOURCE,
+                "location": "AT_HOME",
+            }
+            for start, end, kwh in slots
+        ]
+
+    def _update_boosts(self, now: datetime) -> None:
+        session = self._float_state(self.session_entity)
+        unplugged = self._state(self.plug_entity) in UNPLUGGED
+        boosting = self._state(self.status_entity) == "Boosting"
+        kept = []
+        for boost in self.boosts:
+            boost.track(session)
+            idle_manual = (
+                boost.kind == BOOST_MANUAL
+                and not boosting
+                and now - datetime.fromisoformat(boost.started) > MANUAL_BOOST_GRACE
+            )
+            if not (boost.finished(now) or unplugged or idle_manual):
+                kept.append(boost)
+        self.boosts = kept
+
     async def async_set_enabled(self, enabled: bool) -> None:
         self.schedule = {**self.schedule, "enabled": enabled}
         await self.async_update()
@@ -150,6 +232,7 @@ class ScheduleController:
             # Yesterday's override can still matter while its charge overruns past midnight.
             oldest = (now.date() - timedelta(days=1)).isoformat()
             self.overrides = {day: o for day, o in self.overrides.items() if day >= oldest}
+            self._update_boosts(now)
             self.run, self.decision = advance(
                 self.schedule, self.run, now, self._float_state(self.session_entity), self.overrides
             )
@@ -211,6 +294,7 @@ class ScheduleController:
         return {
             "schedule": self.schedule,
             "overrides": self.overrides,
+            "boosts": [boost.as_dict() for boost in self.boosts],
             "run": self.run.as_dict() if self.run else None,
             "boost_started": self._boost_started,
         }
