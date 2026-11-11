@@ -51,6 +51,22 @@ The card finds the zappi's other sensors from the charge mode entity's device. S
 | `solar_power_entity`    | auto          | Solar generation power                              |
 | `home_power_entity`     | auto          | Home consumption power                              |
 
+| `calibration`           | none          | Up to 5 past charges, see below                     |
+
+### Battery calibration
+
+Cars without onboard charge limiting (e.g. MG5) can't tell the zappi to stop at a percentage.
+The card estimates instead: in the card editor's **Battery calibration** section, enter up to five
+past charges (battery % before, kWh the zappi added, battery % after). It averages the kWh per
+percent of the complete rows. The result includes charging losses.
+
+```yaml
+calibration:
+  - start_percent: 55
+    kwh: 15.1
+    end_percent: 81
+```
+
 Smart boost sends the time as `HH:MM`. The zappi works in 15-minute steps.
 
 ## Development

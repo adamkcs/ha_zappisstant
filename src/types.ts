@@ -41,6 +41,14 @@ export interface ZappiCardConfig {
   show_power_flow?: boolean;
   show_boost?: boolean;
   default_boost_kwh?: number;
+  /** Past charging sessions used to convert battery percentage to kWh. */
+  calibration?: CalibrationSlot[];
+}
+
+export interface CalibrationSlot {
+  start_percent?: number;
+  kwh?: number;
+  end_percent?: number;
 }
 
 export interface LovelaceCardEditor extends HTMLElement {
