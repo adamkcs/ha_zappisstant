@@ -15,7 +15,7 @@ import { cardStyles } from "./styles";
 import type { HomeAssistant, LovelaceCardEditor, ZappiCardConfig } from "./types";
 import "./editor";
 
-const CARD_VERSION = "0.1.1";
+const CARD_VERSION = "0.1.2";
 
 const MODE_ICONS: Record<string, string> = {
   Fast: "mdi:lightning-bolt",
@@ -193,14 +193,24 @@ export class ZappiCard extends LitElement {
     return this._state(this._config.entity);
   }
 
-  /** A target boost only ends at the target if the zappi falls back to Stopped afterwards. */
-  private _willSwitchToStopped(): boolean {
+  /**
+   * A target boost only ends at the target if the zappi goes to Stopped once it's done. Only
+   * Zappistant can do that, since it keeps running after the boost; a zappi can't boost while
+   * Stopped, so it can't be switched beforehand.
+   */
+  private _willStopAfter(): boolean {
     return (
       !!this._config.switch_to_stopped &&
+      !!findScheduleStatus(this.hass) &&
       !this._octopusMode() &&
-      this._preset !== "full" &&
-      this._mode() !== "Stopped"
+      this._preset !== "full"
     );
+  }
+
+  /** A zappi only boosts in Eco or Eco+; in any other mode it's switched to Eco+ first. */
+  private _needsEcoPlus(): boolean {
+    const mode = this._mode();
+    return mode !== "Eco" && mode !== "Eco+";
   }
 
   /** Intelligent Octopus Go controls the zappi, which must then stay in Eco+. */
@@ -218,13 +228,13 @@ export class ZappiCard extends LitElement {
           kind: kind === "boost" ? "manual" : "smart",
           kwh,
           ready_by: kind === "boost" ? undefined : this._boostBy.slice(0, 5),
-          switch_to_stopped: this._willSwitchToStopped(),
+          switch_to_stopped: this._willStopAfter(),
         });
         return;
       }
-      // Set the mode first: changing mode afterwards could cancel the boost.
-      if (this._willSwitchToStopped()) {
-        await this.hass.callService("select", "select_option", { option: "Stopped" }, target);
+      // The myenergi integration silently ignores a boost outside Eco and Eco+.
+      if (this._needsEcoPlus()) {
+        await this.hass.callService("select", "select_option", { option: "Eco+" }, target);
       }
       if (kind === "boost") {
         await this.hass.callService("myenergi", "myenergi_boost", { amount: kwh }, target);
@@ -661,17 +671,24 @@ export class ZappiCard extends LitElement {
         at the normal rate, and the zappi stays in ${mode ?? "Eco+"}.
       </div>`;
     }
-    if (this._preset === "full" || mode === "Stopped" || mode === undefined) return nothing;
-    if (this._willSwitchToStopped()) {
+    if (mode === undefined) return nothing;
+    // The zappi boosts in Eco+ (or Eco) and returns to that mode afterwards.
+    const boostMode = this._needsEcoPlus() ? "Eco+" : mode;
+    const first = this._needsEcoPlus() ? `Switches from ${mode} to Eco+ to boost. ` : "";
+    if (this._preset === "full") {
+      return first ? html`<div class="note"><ha-icon icon="mdi:information-outline"></ha-icon>${first}</div>` : nothing;
+    }
+    if (this._willStopAfter()) {
       return html`<div class="note">
-        <ha-icon icon="mdi:information-outline"></ha-icon>Switches from ${mode} to Stopped first, so charging ends at the target.
+        <ha-icon icon="mdi:information-outline"></ha-icon>${first}Switches to Stopped when it's done, so charging ends at
+        the target.
       </div>`;
     }
-    return html`<div class="note warn">
-      <ha-icon icon="mdi:alert-outline"></ha-icon>
-      ${mode === "Eco+"
-        ? "After the boost the zappi carries on in Eco+ and may charge past the target from surplus solar."
-        : `After the boost the zappi carries on charging in ${mode}, so it won't stop at the target.`}
+    return html`<div class="note ${boostMode === "Eco" ? "warn" : ""}">
+      <ha-icon icon=${boostMode === "Eco" ? "mdi:alert-outline" : "mdi:information-outline"}></ha-icon>${first}
+      ${boostMode === "Eco+"
+        ? "Afterwards it stays in Eco+, so it only carries on from surplus solar."
+        : "Afterwards it carries on charging in Eco, so it won't stop at the target."}
     </div>`;
   }
 }

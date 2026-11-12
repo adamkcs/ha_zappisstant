@@ -55,7 +55,7 @@ The card finds the zappi's other sensors from the charge mode entity's device. S
 | `battery_soh_percent`   | none         | Last read battery state of health (for later use)    |
 | `max_charge_percent`    | none         | Highest target % unless 100% is picked on the card   |
 | `default_ready_by`      | `07:00`      | Pre-filled "Ready by" time for smart boost           |
-| `switch_to_stopped`     | `true`       | Switch to Stopped before a target boost (see below)  |
+| `switch_to_stopped`     | `true`       | Switch to Stopped after a target boost (see below)   |
 | `calibration`           | none         | Up to 5 past charges, see below                      |
 | `status_entity`         | auto         | Status sensor (Paused / Charging / Boosting / ...)   |
 | `plug_status_entity`    | auto         | Plug status sensor                                   |
@@ -90,10 +90,11 @@ allowed) and needs no current % or calibration, since the car stops itself when 
 scheduling (and cheap tariff slots, if set up in the myenergi app). **Boost now** charges immediately.
 Smart boost sends the time as `HH:MM`. The zappi works in 15-minute steps.
 
-When a boost finishes, the zappi returns to its charge mode. In Fast or Eco it keeps charging, and in
-Eco+ it may continue from surplus solar, so it wouldn't stop at the target. With `switch_to_stopped`
-on (the default), the card switches the zappi to Stopped before starting a target boost. 100% charges
-are left in their current mode.
+A zappi only boosts in **Eco or Eco+** (it ignores a boost in Stopped or Fast), so the card switches
+to Eco+ first when needed. When the boost finishes, the zappi returns to that mode: in Eco+ it only
+carries on from surplus solar, in Eco it keeps charging. With `switch_to_stopped` on (the default) and
+the Zappistant integration installed, the zappi is switched to Stopped once a target boost is done, so
+charging ends at the target. 100% charges are left in Eco+.
 
 ### Weekly schedule
 

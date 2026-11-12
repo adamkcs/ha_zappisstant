@@ -151,11 +151,12 @@ export class ZappiCardEditor extends LitElement {
                     switch_to_stopped: (ev.target as HTMLInputElement).checked ? undefined : false,
                   })}
               />
-              Switch to Stopped before boosting
+              Switch to Stopped after a target boost
             </span>
             <span class="hint">
-              After a boost the zappi returns to its charge mode. Stopped makes charging end at the target.
-              Not applied to 100% charges.
+              A zappi only boosts in Eco or Eco+ and returns to that mode afterwards. Switching to Stopped once
+              the boost is done makes charging end at the target. Needs the Zappistant integration; not
+              applied to 100% charges.
             </span>
           </label>
         </div>
