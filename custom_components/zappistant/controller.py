@@ -19,26 +19,36 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_CHARGE_RATE,
+    CONF_CONTROL_MODE,
     CONF_MODE_ENTITY,
+    CONF_OCTOPUS_BATTERY,
+    CONF_OCTOPUS_TARGET_ENTITY,
+    CONF_OCTOPUS_TIME_ENTITY,
     CONF_PLUG_ENTITY,
     CONF_SESSION_ENTITY,
     CONF_STATUS_ENTITY,
     CONF_SWITCH_TO_STOPPED,
     DEFAULT_CHARGE_RATE,
+    DEFAULT_OCTOPUS_BATTERY,
     DISPATCH_SOURCE,
     DOMAIN,
+    MODE_OCTOPUS,
+    MODE_ZAPPI,
     MYENERGI_DOMAIN,
 )
 from .planner import (
     BOOST_MANUAL,
     BOOST_SMART,
     STATE_DISABLED,
+    STATE_OCTOPUS,
     Boost,
     Decision,
     Run,
     advance,
     empty_schedule,
     next_interval,
+    octopus_percent,
+    octopus_upcoming,
     planned_slots,
     ready_by_time,
     upcoming,
@@ -57,6 +67,8 @@ MAX_BOOST_KWH = 99
 UNPLUGGED = {"", "EV Disconnected"}
 # A boost now that the zappi hasn't been running for this long has finished or been stopped.
 MANUAL_BOOST_GRACE = timedelta(minutes=10)
+# Octopus's entities update from its API, so give a change time to show before setting it again.
+OCTOPUS_RETRY = timedelta(minutes=5)
 
 
 class ScheduleController:
@@ -64,16 +76,23 @@ class ScheduleController:
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
+
+        def option(key: str, default: Any = None) -> Any:
+            return entry.options.get(key, entry.data.get(key, default))
+
         self.mode_entity: str = entry.data[CONF_MODE_ENTITY]
         self.session_entity: str = entry.data[CONF_SESSION_ENTITY]
         self.plug_entity: str = entry.data[CONF_PLUG_ENTITY]
         self.status_entity: str = entry.data[CONF_STATUS_ENTITY]
-        self.switch_to_stopped: bool = entry.options.get(
-            CONF_SWITCH_TO_STOPPED, entry.data.get(CONF_SWITCH_TO_STOPPED, True)
-        )
-        self.charge_rate: float = entry.options.get(
-            CONF_CHARGE_RATE, entry.data.get(CONF_CHARGE_RATE, DEFAULT_CHARGE_RATE)
-        )
+        self.switch_to_stopped: bool = option(CONF_SWITCH_TO_STOPPED, True)
+        self.charge_rate: float = option(CONF_CHARGE_RATE, DEFAULT_CHARGE_RATE)
+        self.control_mode: str = option(CONF_CONTROL_MODE, MODE_ZAPPI)
+        self.octopus_target_entity: str | None = option(CONF_OCTOPUS_TARGET_ENTITY)
+        self.octopus_time_entity: str | None = option(CONF_OCTOPUS_TIME_ENTITY)
+        self.octopus_battery: float = option(CONF_OCTOPUS_BATTERY, DEFAULT_OCTOPUS_BATTERY)
+        # What Octopus should currently be set to, for the status sensor and the card.
+        self.octopus_target: dict[str, Any] | None = None
+        self._octopus_last_set: tuple[Any, ...] | None = None
         self.schedule: dict[str, Any] = empty_schedule()
         # Boosts started from the card, kept so the charging plan includes them.
         self.boosts: list[Boost] = []
@@ -102,13 +121,11 @@ class ScheduleController:
         self._boost_started = data.get("boost_started", False)
 
         self._unsubs.append(async_track_time_interval(self.hass, self._async_tick, TICK))
-        self._unsubs.append(
-            async_track_state_change_event(
-                self.hass,
-                [self.session_entity, self.plug_entity, self.status_entity],
-                self._async_state_changed,
-            )
-        )
+        watched = [self.session_entity, self.plug_entity, self.status_entity]
+        if self.octopus_mode:
+            # Put Octopus back to the plan if its target is changed elsewhere, e.g. in its app.
+            watched += [e for e in (self.octopus_target_entity, self.octopus_time_entity) if e]
+        self._unsubs.append(async_track_state_change_event(self.hass, watched, self._async_state_changed))
         await self.async_update()
 
     async def async_stop(self) -> None:
@@ -142,6 +159,9 @@ class ScheduleController:
     ) -> None:
         """Start a boost now or a smart boost, and add it to the charging plan."""
         now = dt_util.now()
+        # Octopus needs the zappi left in Eco+ to control it.
+        if self.octopus_mode:
+            switch_to_stopped = False
         if switch_to_stopped and self._state(self.mode_entity) not in (None, "Stopped"):
             await self._async_call("select", "select_option", {"option": "Stopped"})
         if kind == BOOST_SMART:
@@ -171,11 +191,15 @@ class ScheduleController:
         self.boosts = []
         await self.async_update()
 
+    @property
+    def octopus_mode(self) -> bool:
+        return self.control_mode == MODE_OCTOPUS
+
     def planned_dispatches(self) -> list[dict[str, Any]]:
         """Expected charging in the format Predbat reads from a car charging slot sensor."""
-        slots = planned_slots(
-            self.schedule, self.run, dt_util.now(), self.charge_rate, self.overrides, self.boosts
-        )
+        # In Octopus mode Octopus's own dispatch sensor has the schedule's slots; only boosts are ours.
+        schedule = {**self.schedule, "enabled": False} if self.octopus_mode else self.schedule
+        slots = planned_slots(schedule, self.run, dt_util.now(), self.charge_rate, self.overrides, self.boosts)
         return [
             {
                 "start": start.isoformat(timespec="seconds"),
@@ -209,8 +233,17 @@ class ScheduleController:
 
     def status(self) -> dict[str, Any]:
         now = dt_util.now()
+        if self.octopus_mode:
+            return {
+                "state": self.decision.state,
+                "mode": self.control_mode,
+                "upcoming": octopus_upcoming(self.schedule, now, self.overrides),
+                "octopus": self.octopus_target,
+                "octopus_battery_kwh": self.octopus_battery,
+            }
         return {
             "state": self.decision.state,
+            "mode": self.control_mode,
             "run_date": self.run.date if self.run else None,
             "planned_kwh": self.run.kwh if self.run else None,
             "delivered_kwh": round(self.run.delivered, 2) if self.run else None,
@@ -233,14 +266,19 @@ class ScheduleController:
             oldest = (now.date() - timedelta(days=1)).isoformat()
             self.overrides = {day: o for day, o in self.overrides.items() if day >= oldest}
             self._update_boosts(now)
-            self.run, self.decision = advance(
-                self.schedule, self.run, now, self._float_state(self.session_entity), self.overrides
-            )
             try:
-                await self._async_apply(now)
+                if self.octopus_mode:
+                    self.run = None
+                    self.decision = Decision(STATE_OCTOPUS if self.schedule["enabled"] else STATE_DISABLED)
+                    await self._async_sync_octopus(now)
+                else:
+                    self.run, self.decision = advance(
+                        self.schedule, self.run, now, self._float_state(self.session_entity), self.overrides
+                    )
+                    await self._async_apply(now)
             except HomeAssistantError:
                 # Try again on the next tick rather than stopping the schedule.
-                _LOGGER.exception("Failed to control the zappi")
+                _LOGGER.exception("Failed to control the charger")
             self._store.async_delay_save(self._data, 5)
             for listener in list(self._listeners):
                 listener()
@@ -273,9 +311,48 @@ class ScheduleController:
                 _LOGGER.info("Stopping scheduled boost (%s)", decision.state)
                 await self._async_call(MYENERGI_DOMAIN, "myenergi_stop_boost", {})
 
-    async def _async_call(self, domain: str, service: str, data: dict[str, Any]) -> None:
+    async def _async_sync_octopus(self, now: datetime) -> None:
+        """Keep Octopus's charge target and ready-by time set for the upcoming charge."""
+        charge = octopus_upcoming(self.schedule, now, self.overrides) if self.schedule["enabled"] else None
+        if charge is None:
+            self.octopus_target = None
+            return
+        percent = octopus_percent(charge["kwh"], self.octopus_battery)
+        ready_by = charge["ready_by"]
+        self.octopus_target = {"date": charge["date"], "percent": percent, "ready_by": ready_by}
+        if not self.octopus_target_entity or not self.octopus_time_entity:
+            return
+
+        current_percent = self._float_state(self.octopus_target_entity)
+        # A time entity's state is "HH:MM:SS", a select's option is "HH:MM".
+        current_time = (self._state(self.octopus_time_entity) or "")[:5]
+        if current_percent == percent and current_time == ready_by:
+            self._octopus_last_set = None
+            return
+        wanted = (percent, ready_by)
+        if (
+            self._octopus_last_set is not None
+            and self._octopus_last_set[:2] == wanted
+            and now - self._octopus_last_set[2] < OCTOPUS_RETRY
+        ):
+            return  # just set; wait for Octopus's entities to catch up
+        self._octopus_last_set = (*wanted, now)
+
+        if current_percent != percent:
+            _LOGGER.info("Setting Octopus charge target to %s%% for %s", percent, charge["date"])
+            await self._async_call("number", "set_value", {"value": percent}, self.octopus_target_entity)
+        if current_time != ready_by:
+            _LOGGER.info("Setting Octopus ready-by time to %s", ready_by)
+            if self.octopus_time_entity.startswith("select."):
+                await self._async_call("select", "select_option", {"option": ready_by}, self.octopus_time_entity)
+            else:
+                await self._async_call("time", "set_value", {"time": f"{ready_by}:00"}, self.octopus_time_entity)
+
+    async def _async_call(
+        self, domain: str, service: str, data: dict[str, Any], entity_id: str | None = None
+    ) -> None:
         await self.hass.services.async_call(
-            domain, service, data, target={"entity_id": self.mode_entity}, blocking=True
+            domain, service, data, target={"entity_id": entity_id or self.mode_entity}, blocking=True
         )
 
     def _state(self, entity_id: str) -> str | None:

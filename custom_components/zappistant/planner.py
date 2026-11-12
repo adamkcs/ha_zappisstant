@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
+import math
 from typing import Any
 
 DAYS = 7
@@ -36,6 +37,8 @@ STATE_CHARGING = "charging"
 STATE_OVERRUN = "overrun"
 STATE_DONE = "done"
 STATE_ENDED = "ended"
+# Octopus mode: Octopus does the charging; Zappistant only sets its target.
+STATE_OCTOPUS = "octopus"
 
 Overrides = dict[str, dict[str, Any]]
 
@@ -73,6 +76,8 @@ def empty_day() -> dict[str, Any]:
         "kwh": None,
         "kwh_manual": False,
         "intervals": [],
+        # Octopus mode only: when the charge must be finished, the next morning.
+        "ready_by": None,
     }
 
 
@@ -115,6 +120,9 @@ def validate_schedule(data: Any) -> dict[str, Any]:
             merged.append((start, end, overrun))
         if len(merged) > MAX_INTERVALS:
             raise ValueError(f"At most {MAX_INTERVALS} intervals per day")
+        ready_by = day.get("ready_by")
+        if ready_by is not None and parse_time(ready_by) >= DAY_MINUTES:
+            raise ValueError("Ready-by time must be before 24:00")
 
         days.append(
             {
@@ -127,6 +135,7 @@ def validate_schedule(data: Any) -> dict[str, Any]:
                     {"start": format_time(start), "end": format_time(end), "overrun": overrun}
                     for start, end, overrun in merged
                 ],
+                "ready_by": format_time(parse_time(ready_by)) if ready_by is not None else None,
             }
         )
     return {"enabled": bool(data.get("enabled", False)), "days": days}
@@ -137,7 +146,26 @@ def validate_override(data: dict[str, Any]) -> dict[str, Any]:
     kwh = float(data["kwh"])
     if not 0 <= kwh <= MAX_KWH:
         raise ValueError(f"kWh must be between 0 and {MAX_KWH}")
-    return {"start_percent": _percent(data.get("start_percent"), "Start %"), "kwh": kwh}
+    return {
+        "start_percent": _percent(data.get("start_percent"), "Start %"),
+        "target_percent": _percent(data.get("target_percent"), "Target %"),
+        "kwh": kwh,
+    }
+
+
+def _upcoming_fields(weekly: dict[str, Any], override: dict[str, Any] | None, kwh: float) -> dict[str, Any]:
+    """The percentages and amounts shown for an upcoming charge, with any one-off override applied."""
+    override = override or {}
+    return {
+        "start_percent": override.get("start_percent", weekly["start_percent"]),
+        # Overrides saved before targets could be adjusted have no target of their own.
+        "target_percent": override.get("target_percent") or weekly["target_percent"],
+        "kwh": kwh,
+        "planned_kwh": weekly["kwh"],
+        "overridden": bool(override),
+        # A 0 kWh override means "skip this charge".
+        "skipped": bool(override) and override["kwh"] == 0,
+    }
 
 
 @dataclass
@@ -220,24 +248,66 @@ def upcoming(schedule: dict[str, Any], now: datetime, overrides: Overrides | Non
     # From yesterday, whose overnight charge may still be running, to a week ahead.
     for offset in range(-1, DAYS + 1):
         day = now.date() + timedelta(days=offset)
+        override = (overrides or {}).get(day.isoformat())
         charge = day_charge(schedule, day, overrides)
+        if charge is None and override is not None and override["kwh"] == 0:
+            # Skipped: still show it, with the slots it would have had, so it can be undone.
+            others = {d: o for d, o in (overrides or {}).items() if d != day.isoformat()}
+            charge = day_charge(schedule, day, others)
+            if charge is not None:
+                charge = {**charge, "kwh": 0.0}
         if charge is None:
             continue
         minute = _minute_of(now, day)
         if all(w.end <= minute for w in charge["windows"]):
             continue
+        return {
+            "date": day.isoformat(),
+            "intervals": [w.as_interval() for w in charge["windows"] if w.end > minute],
+            **_upcoming_fields(schedule["days"][day.weekday()], override, charge["kwh"]),
+        }
+    return None
+
+
+# Octopus mode: Octopus decides when to charge, so a day's plan is just how much and a
+# ready-by time the next morning. Octopus's charge target is the % of the battery to add
+# (it can't see the car's own %), between these limits.
+OCTOPUS_MIN_PERCENT = 5
+OCTOPUS_MAX_PERCENT = 100
+
+
+def octopus_upcoming(
+    schedule: dict[str, Any], now: datetime, overrides: Overrides | None = None
+) -> dict[str, Any] | None:
+    """The next charge Octopus should be set up for: the evening's, until its ready-by time next morning."""
+    if not schedule["enabled"]:
+        return None
+    for offset in range(-1, DAYS + 1):
+        day = now.date() + timedelta(days=offset)
+        plan = _plan(schedule, day, overrides)
+        # A 0 kWh override still counts: that night is being skipped, not handed to the next day.
+        if not plan["enabled"] or not plan["ready_by"] or plan["kwh"] is None:
+            continue
+        deadline = datetime.combine(
+            day + timedelta(days=1), time(), tzinfo=now.tzinfo
+        ) + timedelta(minutes=parse_time(plan["ready_by"]))
+        if now >= deadline:
+            continue
         weekly = schedule["days"][day.weekday()]
         override = (overrides or {}).get(day.isoformat())
         return {
             "date": day.isoformat(),
-            "intervals": [w.as_interval() for w in charge["windows"] if w.end > minute],
-            "start_percent": override["start_percent"] if override else weekly["start_percent"],
-            "target_percent": weekly["target_percent"],
-            "kwh": charge["kwh"],
-            "planned_kwh": weekly["kwh"],
-            "overridden": override is not None,
+            "intervals": [],
+            "ready_by": plan["ready_by"],
+            **_upcoming_fields(weekly, override, plan["kwh"]),
         }
     return None
+
+
+def octopus_percent(kwh: float, battery_kwh: float) -> int:
+    """The "% to add" for Octopus that delivers about this many kWh, within Octopus's limits."""
+    percent = math.ceil(kwh / battery_kwh * 100 - 1e-9)
+    return min(OCTOPUS_MAX_PERCENT, max(OCTOPUS_MIN_PERCENT, percent))
 
 
 def next_interval(schedule: dict[str, Any], now: datetime, overrides: Overrides | None = None) -> dict[str, Any] | None:

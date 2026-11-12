@@ -41,6 +41,7 @@ const DISPLAY_SCHEMA = [
     type: "grid",
     name: "",
     schema: [
+      { name: "show_stats", selector: { boolean: {} } },
       { name: "show_power_flow", selector: { boolean: {} } },
       { name: "show_boost", selector: { boolean: {} } },
       { name: "show_upcoming", selector: { boolean: {} } },
@@ -51,6 +52,7 @@ const DISPLAY_SCHEMA = [
 const LABELS: Record<string, string> = {
   entity: "Charge mode entity",
   name: "Name",
+  show_stats: "Show charging figures (power, session)",
   show_power_flow: "Show solar / grid / home power",
   show_boost: "Show boost controls",
   show_upcoming: "Show upcoming scheduled charge",
@@ -71,7 +73,7 @@ export class ZappiCardEditor extends LitElement {
   @state() private _config?: ZappiCardConfig;
 
   public setConfig(config: ZappiCardConfig): void {
-    this._config = { show_power_flow: true, show_boost: true, show_upcoming: true, ...config };
+    this._config = { show_stats: true, show_power_flow: true, show_boost: true, show_upcoming: true, ...config };
   }
 
   protected render(): TemplateResult | typeof nothing {

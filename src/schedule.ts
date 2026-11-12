@@ -21,7 +21,12 @@ export interface DayPlan {
   /** True when kWh was typed in rather than calculated from the percentages. */
   kwh_manual: boolean;
   intervals: ScheduleInterval[];
+  /** Octopus mode only: when the evening's charge must be done, the next morning ("HH:MM"). */
+  ready_by: string | null;
 }
+
+/** Zappistant boosting the zappi in the slots, or Intelligent Octopus Go doing the charging. */
+export type ControlMode = "zappi" | "octopus";
 
 export interface Schedule {
   enabled: boolean;
@@ -39,17 +44,31 @@ export interface UpcomingCharge {
   /** kWh from the weekly plan. */
   planned_kwh: number | null;
   overridden: boolean;
+  /** Skipped for this date with a 0 kWh override; shown so it can be undone. */
+  skipped?: boolean;
+  /** Octopus mode: the ready-by time the next morning, in place of slots. */
+  ready_by?: string;
 }
 
 export interface ScheduleStatus {
   state: string;
-  run_date: string | null;
-  planned_kwh: number | null;
-  delivered_kwh: number | null;
-  remaining_kwh: number;
-  current_interval: ScheduleInterval | null;
-  next_interval: ScheduleInterval | null;
+  mode?: ControlMode;
   upcoming: UpcomingCharge | null;
+  // Zappi mode
+  run_date?: string | null;
+  planned_kwh?: number | null;
+  delivered_kwh?: number | null;
+  remaining_kwh?: number;
+  current_interval?: ScheduleInterval | null;
+  next_interval?: ScheduleInterval | null;
+  // Octopus mode: what Octopus is being set to, and the battery size it converts % with.
+  octopus?: { date: string; percent: number; ready_by: string } | null;
+  octopus_battery_kwh?: number;
+}
+
+/** Octopus's charge target is the % of the battery to add, between 5 and 100. Mirrors planner.octopus_percent. */
+export function octopusPercent(kwh: number, batteryKwh: number): number {
+  return Math.min(100, Math.max(5, Math.ceil((kwh / batteryKwh) * 100 - 1e-9)));
 }
 
 interface ScheduleResponse {
@@ -63,11 +82,11 @@ export const fetchSchedule = (hass: HomeAssistant) =>
 export const saveSchedule = (hass: HomeAssistant, schedule: Schedule) =>
   hass.callWS<ScheduleResponse>({ type: "zappistant/schedule/save", schedule });
 
-/** Adjust one date's charge without changing the weekly plan; kwh null goes back to the plan. */
+/** Adjust one date's charge without changing the weekly plan; kwh 0 skips it, null goes back to the plan. */
 export const setOverride = (
   hass: HomeAssistant,
   date: string,
-  override: { kwh: number; start_percent: number } | null,
+  override: { kwh: number; start_percent: number | null; target_percent: number | null } | null,
 ) => hass.callWS<{ status: ScheduleStatus }>({ type: "zappistant/override/set", date, ...override });
 
 /** Start a boost through Zappistant, which adds it to the charging plan it publishes. */
@@ -119,7 +138,15 @@ export function countIntervals(slots: boolean[]): number {
 }
 
 export function emptyDay(): DayPlan {
-  return { enabled: false, start_percent: null, target_percent: null, kwh: null, kwh_manual: false, intervals: [] };
+  return {
+    enabled: false,
+    start_percent: null,
+    target_percent: null,
+    kwh: null,
+    kwh_manual: false,
+    intervals: [],
+    ready_by: null,
+  };
 }
 
 export function emptySchedule(): Schedule {
@@ -127,8 +154,10 @@ export function emptySchedule(): Schedule {
 }
 
 /** A day the integration will act on: enabled, with slots and an amount. */
-export function isActive(day: DayPlan): boolean {
-  return day.enabled && day.intervals.length > 0 && !!day.kwh;
+export function isActive(day: DayPlan, mode: ControlMode = "zappi"): boolean {
+  // Octopus picks the slots itself, so there it's a ready-by time instead.
+  const when = mode === "octopus" ? !!day.ready_by : day.intervals.length > 0;
+  return day.enabled && when && !!day.kwh;
 }
 
 // Overnight charges, mirroring planner.py: a day whose last interval runs to 24:00 continues

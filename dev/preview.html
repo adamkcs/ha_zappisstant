@@ -56,6 +56,10 @@
         gap: 24px;
         align-items: start;
       }
+      /* Size columns to the screen like a dashboard does, rather than to their content. */
+      .layout > div {
+        min-width: 0;
+      }
       .panel {
         background: var(--card-background-color);
         border-radius: 12px;
@@ -92,6 +96,7 @@
         </select>
       </label>
       <button id="theme">Toggle dark mode</button>
+      <label><input type="checkbox" id="octopus" /> Intelligent Octopus Go mode</label>
     </div>
 
     <div class="layout">
@@ -207,11 +212,8 @@
           states[id] = { entity_id: id, state: String(values[key]), attributes: {}, last_changed: "", last_updated: "" };
         }
         states[IDS.mode].attributes = { friendly_name: "myenergi Zappi Charge Mode", options: ["Fast", "Eco", "Eco+", "Stopped"] };
-        states[SCHEDULE_STATUS] = {
-          entity_id: SCHEDULE_STATUS,
-          state: schedule.enabled ? "idle" : "disabled",
-          attributes: { run_date: null, planned_kwh: null, delivered_kwh: null, upcoming: mockUpcoming() },
-        };
+        const status = mockStatus();
+        states[SCHEDULE_STATUS] = { entity_id: SCHEDULE_STATUS, state: status.state, attributes: status };
         return { states, entities, language: "en", callService, callWS };
       };
 
@@ -219,14 +221,14 @@
       const SCHEDULE_STATUS = "sensor.zappi_schedule_status";
       entities[SCHEDULE_STATUS] = { entity_id: SCHEDULE_STATUS, platform: "zappistant", device_id: "schedule" };
       const day = (patch = {}) => ({
-        enabled: false, start_percent: null, target_percent: null, kwh: null, kwh_manual: false, intervals: [], ...patch,
+        enabled: false, start_percent: null, target_percent: null, kwh: null, kwh_manual: false, intervals: [], ready_by: null, ...patch,
       });
       let schedule = {
         enabled: true,
         days: [
           day(),
-          day({ enabled: true, start_percent: 45, target_percent: 80, kwh: 21, intervals: [{ start: "22:00", end: "24:00", overrun: false }] }),
-          day({ enabled: true, start_percent: 45, target_percent: 100, kwh: 32, intervals: [{ start: "00:00", end: "05:00", overrun: false }, { start: "22:00", end: "24:00", overrun: true }] }),
+          day({ enabled: true, start_percent: 45, target_percent: 80, kwh: 21, ready_by: "07:00", intervals: [{ start: "22:00", end: "24:00", overrun: false }] }),
+          day({ enabled: true, start_percent: 45, target_percent: 100, kwh: 32, ready_by: "07:00", intervals: [{ start: "00:00", end: "05:00", overrun: false }, { start: "22:00", end: "24:00", overrun: true }] }),
           day({ enabled: true, intervals: [{ start: "00:00", end: "05:00", overrun: false }] }),
           day(), day(), day(),
         ],
@@ -244,25 +246,33 @@
         const now = new Date();
         return new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
       };
-      function planFor(d) {
+      function planFor(d, ignoreOverride = false) {
         const weekly = schedule.days[(d.getDay() + 6) % 7];
-        const override = overrides[isoDate(d)];
+        const override = ignoreOverride ? undefined : overrides[isoDate(d)];
         return override ? { ...weekly, kwh: override.kwh } : weekly;
       }
-      function runsOvernight(d) {
-        const plan = planFor(d);
+      // Like planner._upcoming_fields(): percentages with any one-off override applied.
+      function upcomingFields(weekly, override, kwh) {
+        return {
+          start_percent: override ? override.start_percent : weekly.start_percent,
+          target_percent: (override && override.target_percent) || weekly.target_percent,
+          kwh, planned_kwh: weekly.kwh, overridden: !!override, skipped: !!override && override.kwh === 0,
+        };
+      }
+      function runsOvernight(d, ignoreOverride = false) {
+        const plan = planFor(d, ignoreOverride);
         const last = plan.intervals[plan.intervals.length - 1];
         return plan.enabled && !!plan.kwh && !!last && last.end === "24:00" && last.start !== "00:00";
       }
-      function dayCharge(offset) {
+      function dayCharge(offset, ignoreOverride = false) {
         const d = dateAt(offset);
-        const plan = planFor(d);
+        const plan = planFor(d, ignoreOverride);
         if (!plan.enabled || !plan.kwh) return null;
         let windows = plan.intervals.map((iv) => ({ start: toMin(iv.start), end: toMin(iv.end), overrun: iv.overrun }));
         if (windows[0]?.start === 0 && runsOvernight(dateAt(offset - 1))) windows = windows.slice(1);
         if (!windows.length) return null;
         const next = planFor(dateAt(offset + 1));
-        if (runsOvernight(d) && next.enabled && next.intervals[0]?.start === "00:00") {
+        if (runsOvernight(d, ignoreOverride) && next.enabled && next.intervals[0]?.start === "00:00") {
           const last = windows[windows.length - 1];
           windows[windows.length - 1] = { ...last, end: 1440 + toMin(next.intervals[0].end) };
         }
@@ -272,39 +282,71 @@
         if (!schedule.enabled) return null;
         const now = new Date();
         for (let offset = -1; offset <= 7; offset++) {
-          const charge = dayCharge(offset);
+          const d = dateAt(offset);
+          const override = overrides[isoDate(d)];
+          let charge = dayCharge(offset);
+          // Skipped (0 kWh): still shown with its slots so it can be undone.
+          if (!charge && override && override.kwh === 0) {
+            charge = dayCharge(offset, true);
+            if (charge) charge = { ...charge, kwh: 0 };
+          }
           if (!charge) continue;
           const minute = now.getHours() * 60 + now.getMinutes() - offset * 1440;
           if (charge.windows.every((w) => w.end <= minute)) continue;
-          const d = dateAt(offset);
-          const weekly = schedule.days[(d.getDay() + 6) % 7];
-          const override = overrides[isoDate(d)];
           return {
             date: isoDate(d),
             intervals: charge.windows
               .filter((w) => w.end > minute)
               .map((w) => ({ start: fmt(w.start), end: fmt(w.end > 1440 ? w.end - 1440 : w.end), overrun: w.overrun, ends_next_day: w.end > 1440 })),
-            start_percent: override ? override.start_percent : weekly.start_percent,
-            target_percent: weekly.target_percent,
-            kwh: charge.kwh,
-            planned_kwh: weekly.kwh,
-            overridden: !!override,
+            ...upcomingFields(schedule.days[(d.getDay() + 6) % 7], override, charge.kwh),
           };
         }
         return null;
       }
 
+      // Octopus mode: a copy of planner.octopus_upcoming() and octopus_percent().
+      let octopusMode = false;
+      const OCTOPUS_BATTERY = 61;
+      function mockOctopusUpcoming() {
+        if (!schedule.enabled) return null;
+        const now = new Date();
+        for (let offset = -1; offset <= 7; offset++) {
+          const d = dateAt(offset);
+          const plan = planFor(d);
+          if (!plan.enabled || !plan.ready_by || plan.kwh == null) continue;
+          const deadline = dateAt(offset + 1);
+          deadline.setMinutes(toMin(plan.ready_by));
+          if (now >= deadline) continue;
+          const weekly = schedule.days[(d.getDay() + 6) % 7];
+          const override = overrides[isoDate(d)];
+          return { date: isoDate(d), intervals: [], ready_by: plan.ready_by, ...upcomingFields(weekly, override, plan.kwh) };
+        }
+        return null;
+      }
+      function mockStatus() {
+        if (!octopusMode) {
+          return { state: schedule.enabled ? "idle" : "disabled", mode: "zappi", run_date: null, planned_kwh: null, delivered_kwh: null, upcoming: mockUpcoming() };
+        }
+        const upcoming = mockOctopusUpcoming();
+        const percent = upcoming && Math.min(100, Math.max(5, Math.ceil((upcoming.kwh / OCTOPUS_BATTERY) * 100 - 1e-9)));
+        return {
+          state: schedule.enabled ? "octopus" : "disabled", mode: "octopus", upcoming,
+          octopus: upcoming && { date: upcoming.date, percent, ready_by: upcoming.ready_by },
+          octopus_battery_kwh: OCTOPUS_BATTERY,
+        };
+      }
+
       async function callWS(msg) {
-        log.unshift(`ws ${msg.type} ${msg.date ? JSON.stringify({ date: msg.date, kwh: msg.kwh, start_percent: msg.start_percent }) : ""}`);
+        log.unshift(`ws ${msg.type} ${msg.date ? JSON.stringify({ date: msg.date, kwh: msg.kwh, start_percent: msg.start_percent, target_percent: msg.target_percent }) : ""}`);
         document.getElementById("log").textContent = log.slice(0, 20).join("\n");
         await new Promise((r) => setTimeout(r, 300));
         if (msg.type === "zappistant/schedule/save") schedule = structuredClone(msg.schedule);
         if (msg.type === "zappistant/override/set") {
           if (msg.kwh == null) delete overrides[msg.date];
-          else overrides[msg.date] = { kwh: msg.kwh, start_percent: msg.start_percent ?? null };
+          else overrides[msg.date] = { kwh: msg.kwh, start_percent: msg.start_percent ?? null, target_percent: msg.target_percent ?? null };
         }
         refresh();
-        return { schedule: structuredClone(schedule), status: {} };
+        return { schedule: structuredClone(schedule), status: mockStatus() };
       }
 
       async function callService(domain, service, data, target) {
@@ -318,9 +360,19 @@
       }
 
       const card = document.createElement("zappi-card");
-      const editor = document.createElement("zappi-card-editor");
+      let editor;
       document.getElementById("card-slot").append(card);
-      document.getElementById("editor-slot").append(editor);
+
+      // (Re)create the editor so its schedule section loads again, e.g. after switching mode.
+      function mountEditor() {
+        editor = document.createElement("zappi-card-editor");
+        editor.addEventListener("config-changed", (ev) => {
+          config = ev.detail.config;
+          applyConfig();
+        });
+        document.getElementById("editor-slot").replaceChildren(editor);
+      }
+      mountEditor();
 
       const applyConfig = () => {
         card.setConfig(config);
@@ -334,9 +386,11 @@
         editor.hass = hass;
       }
 
-      editor.addEventListener("config-changed", (ev) => {
-        config = ev.detail.config;
+      document.getElementById("octopus").addEventListener("change", (ev) => {
+        octopusMode = ev.target.checked;
+        mountEditor();
         applyConfig();
+        refresh();
       });
 
       document.getElementById("scenario").addEventListener("change", (ev) => {
@@ -349,6 +403,17 @@
         root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark";
       });
 
+      // preview.html?octopus starts in Octopus mode; ?width=360 sets the card's width, e.g. a phone's.
+      const params = new URLSearchParams(location.search);
+      if (params.has("octopus")) {
+        document.getElementById("octopus").checked = octopusMode = true;
+      }
+      if (params.has("dark")) document.documentElement.dataset.theme = "dark";
+      // ?skip starts with today's charge skipped.
+      if (params.has("skip")) overrides[isoDate(new Date())] = { kwh: 0, start_percent: null, target_percent: null };
+      if (params.has("width")) {
+        document.getElementById("card-slot").style.width = `${Number(params.get("width"))}px`;
+      }
       applyConfig();
       refresh();
     </script>

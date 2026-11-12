@@ -10,10 +10,27 @@
           "plug_entity": "Plug status sensor",
           "status_entity": "Status sensor",
           "switch_to_stopped": "Switch to Stopped when a scheduled charge starts",
-          "charge_rate": "Charging power (kW)"
+          "charge_rate": "Charging power (kW)",
+          "control_mode": "Who controls charging"
         },
         "data_description": {
-          "charge_rate": "Used to estimate charging slots for Predbat. 7.0 for a single-phase zappi, 22.0 for three-phase."
+          "charge_rate": "Used to estimate charging slots for Predbat. 7.0 for a single-phase zappi, 22.0 for three-phase.",
+          "control_mode": "Zappistant boosts the zappi in your slots, or Intelligent Octopus Go charges and Zappistant only sets Octopus's charge target and ready-by time.",
+          "switch_to_stopped": "Zappi control only. Without this the zappi keeps charging in its own mode outside your slots. Octopus control always leaves the zappi in Eco+."
+        }
+      },
+      "octopus": {
+        "title": "Intelligent Octopus Go",
+        "description": "Zappistant sets these Octopus Energy integration entities for each upcoming charge. With a zappi, Octopus can't see the car's battery %, so its charge target is the % of the battery to add: Zappistant works it out from the charge's kWh and the battery size you entered in the Octopus app.",
+        "data": {
+          "octopus_target_entity": "Intelligent charge target",
+          "octopus_time_entity": "Intelligent target time",
+          "octopus_battery_kwh": "Battery size in the Octopus app (kWh)"
+        },
+        "data_description": {
+          "octopus_target_entity": "number.octopus_energy_…_intelligent_charge_target",
+          "octopus_time_entity": "time. or select.octopus_energy_…_intelligent_target_time",
+          "octopus_battery_kwh": "Must match the Octopus app, since Octopus turns the % to add into kWh with it."
         }
       }
     },
@@ -29,11 +46,27 @@
       "init": {
         "data": {
           "switch_to_stopped": "Switch to Stopped when a scheduled charge starts",
-          "charge_rate": "Charging power (kW)"
+          "charge_rate": "Charging power (kW)",
+          "control_mode": "Who controls charging"
         },
         "data_description": {
-          "switch_to_stopped": "Without this the zappi keeps charging in its own mode outside your slots.",
-          "charge_rate": "Used to estimate charging slots for Predbat. 7.0 for a single-phase zappi, 22.0 for three-phase."
+          "switch_to_stopped": "Zappi control only. Without this the zappi keeps charging in its own mode outside your slots. Octopus control always leaves the zappi in Eco+.",
+          "charge_rate": "Used to estimate charging slots for Predbat. 7.0 for a single-phase zappi, 22.0 for three-phase.",
+          "control_mode": "Zappistant boosts the zappi in your slots, or Intelligent Octopus Go charges and Zappistant only sets Octopus's charge target and ready-by time."
+        }
+      },
+      "octopus": {
+        "title": "Intelligent Octopus Go",
+        "description": "Zappistant sets these Octopus Energy integration entities for each upcoming charge. With a zappi, Octopus can't see the car's battery %, so its charge target is the % of the battery to add: Zappistant works it out from the charge's kWh and the battery size you entered in the Octopus app.",
+        "data": {
+          "octopus_target_entity": "Intelligent charge target",
+          "octopus_time_entity": "Intelligent target time",
+          "octopus_battery_kwh": "Battery size in the Octopus app (kWh)"
+        },
+        "data_description": {
+          "octopus_target_entity": "number.octopus_energy_…_intelligent_charge_target",
+          "octopus_time_entity": "time. or select.octopus_energy_…_intelligent_target_time",
+          "octopus_battery_kwh": "Must match the Octopus app, since Octopus turns the % to add into kWh with it."
         }
       }
     }
@@ -49,7 +82,8 @@
           "charging": "Charging",
           "overrun": "Charging past slot",
           "done": "Done",
-          "ended": "Ended before target"
+          "ended": "Ended before target",
+          "octopus": "Managed by Octopus"
         }
       }
     },
@@ -61,6 +95,14 @@
     "binary_sensor": {
       "charge_slot": {
         "name": "Charge slot"
+      }
+    }
+  },
+  "selector": {
+    "control_mode": {
+      "options": {
+        "zappi": "Zappistant (boost the zappi in my slots)",
+        "octopus": "Intelligent Octopus Go (Octopus charges, Zappistant sets its target)"
       }
     }
   }

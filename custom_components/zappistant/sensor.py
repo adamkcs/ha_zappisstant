@@ -16,6 +16,7 @@ from .planner import (
     STATE_DONE,
     STATE_ENDED,
     STATE_IDLE,
+    STATE_OCTOPUS,
     STATE_OVERRUN,
     STATE_WAITING,
 )
@@ -39,6 +40,7 @@ class ScheduleStatusSensor(ZappistantEntity, SensorEntity):
         STATE_OVERRUN,
         STATE_DONE,
         STATE_ENDED,
+        STATE_OCTOPUS,
     ]
 
     @property

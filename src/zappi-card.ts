@@ -4,6 +4,7 @@ import { kwhForTarget, summarizeCalibration } from "./calibration";
 import { findChargeModeSelect, findScheduleStatus, resolveEntities, type ZappiEntities } from "./entities";
 import {
   DAY_NAMES,
+  octopusPercent,
   setOverride,
   zappistantBoost,
   zappistantStopBoost,
@@ -55,6 +56,7 @@ export class ZappiCard extends LitElement {
   @state() private _pending?: string;
   @state() private _error?: string;
   @state() private _upcomingStart = "";
+  @state() private _upcomingTarget = "";
 
   /** Which upcoming charge the start % input was filled from, so it refills when that changes. */
   private _upcomingKey?: string;
@@ -82,6 +84,7 @@ export class ZappiCard extends LitElement {
       this._boostBy = config.default_ready_by ?? DEFAULT_READY_BY;
     }
     this._config = {
+      show_stats: true,
       show_power_flow: true,
       show_boost: true,
       show_upcoming: true,
@@ -100,11 +103,13 @@ export class ZappiCard extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     // Discovery only depends on the config and the entity registry, so skip it on state updates.
     if (!this.hass || !(changed.has("hass") || changed.has("_config"))) return;
-    // Refill the upcoming start % from the schedule when the upcoming charge or its saved start changes.
+    // Refill the upcoming start and target % from the schedule when the upcoming charge or its
+    // saved percentages change.
     const upcoming = this._scheduleStatus()?.upcoming;
-    const key = upcoming ? `${upcoming.date}|${upcoming.start_percent}` : undefined;
+    const key = upcoming ? `${upcoming.date}|${upcoming.start_percent}|${upcoming.target_percent}` : undefined;
     if (upcoming && key !== this._upcomingKey) {
       this._upcomingStart = upcoming.start_percent === null ? "" : String(upcoming.start_percent);
+      this._upcomingTarget = upcoming.target_percent === null ? "" : String(upcoming.target_percent);
     }
     this._upcomingKey = key;
     if (!this._entities || this.hass.entities !== this._registry) {
@@ -166,7 +171,8 @@ export class ZappiCard extends LitElement {
     if (this._kwhPerPercent === undefined) {
       return { problem: "Add calibration charges in the card settings to estimate kWh." };
     }
-    if (from === undefined) return { problem: "Enter the current battery %." };
+    // Nothing to explain yet: the empty "Now" field says it all.
+    if (from === undefined) return { problem: "" };
     if (from < 0 || from > 100 || to === undefined || to < 0 || to > 100) {
       return { problem: "Percentages must be between 0 and 100." };
     }
@@ -189,7 +195,17 @@ export class ZappiCard extends LitElement {
 
   /** A target boost only ends at the target if the zappi falls back to Stopped afterwards. */
   private _willSwitchToStopped(): boolean {
-    return !!this._config.switch_to_stopped && this._preset !== "full" && this._mode() !== "Stopped";
+    return (
+      !!this._config.switch_to_stopped &&
+      !this._octopusMode() &&
+      this._preset !== "full" &&
+      this._mode() !== "Stopped"
+    );
+  }
+
+  /** Intelligent Octopus Go controls the zappi, which must then stay in Eco+. */
+  private _octopusMode(): boolean {
+    return this._scheduleStatus()?.mode === "octopus";
   }
 
   private _startBoost(kind: "boost" | "smart-boost", kwh: number): void {
@@ -253,7 +269,10 @@ export class ZappiCard extends LitElement {
     return html`
       <ha-card>
         <div class="header">
-          <span class="title">${name}</span>
+          <div class="heading">
+            <span class="title">${name}</span>
+            <span class="subtitle">${modeEntity.state} mode</span>
+          </div>
           ${this._renderStatusChip()}
         </div>
         ${this._renderStats()}
@@ -288,7 +307,7 @@ export class ZappiCard extends LitElement {
         class="chip ${charging ? "active" : ""} ${fault ? "fault" : ""}"
         @click=${() => this._moreInfo(e.plug_status ?? e.status)}
       >
-        <ha-icon .icon=${icon}></ha-icon>${label}
+        ${charging ? html`<span class="dot"></span>` : html`<ha-icon .icon=${icon}></ha-icon>`}${label}
       </span>
     `;
   }
@@ -303,31 +322,41 @@ export class ZappiCard extends LitElement {
     label: string,
     value: string,
     color: string,
+    live = false,
   ): TemplateResult {
     return html`
-      <div class="stat" @click=${() => this._moreInfo(entityId)}>
-        <ha-icon .icon=${icon} style="color: ${color}"></ha-icon>
+      <div class="stat ${live ? "live" : ""}" style="--tile-color: ${color}" @click=${() => this._moreInfo(entityId)}>
+        <span class="icon-wrap"><ha-icon .icon=${icon}></ha-icon></span>
         <span class="value">${value}</span>
         <span class="label">${label}</span>
       </div>
     `;
   }
 
-  private _renderStats(): TemplateResult {
+  private _renderStats(): TemplateResult | typeof nothing {
     const e = this._entities!;
     const chargePower = this._number(e.charge_power);
     const session = this._number(e.session_energy);
     const grid = this._number(e.grid_power);
     const solar = this._number(e.solar_power);
     const home = this._number(e.home_power);
+    const charge = this._config.show_stats;
     const flow = this._config.show_power_flow;
+    if (!charge && !flow) return nothing;
 
     return html`
       <div class="stats">
-        ${chargePower !== undefined
-          ? this._renderStat(e.charge_power, "mdi:car-electric", "Charging", this._formatPower(chargePower), "var(--zappi-car)")
+        ${charge && chargePower !== undefined
+          ? this._renderStat(
+              e.charge_power,
+              "mdi:car-electric",
+              "Charging",
+              this._formatPower(chargePower),
+              "var(--zappi-car)",
+              chargePower > 50,
+            )
           : nothing}
-        ${session !== undefined
+        ${charge && session !== undefined
           ? this._renderStat(e.session_energy, "mdi:battery-charging", "Session", `${session.toFixed(1)} kWh`, "var(--zappi-car)")
           : nothing}
         ${flow && solar !== undefined
@@ -392,8 +421,8 @@ export class ZappiCard extends LitElement {
       />
     `;
     return html`
-      <div class="boost">
-        <div class="section-label">Boost</div>
+      <div class="block">
+        <div class="block-title"><ha-icon icon="mdi:rocket-launch-outline"></ha-icon>Boost</div>
         <div class="boost-row">
           <label class="field">
             Now ${percentInput(this._currentPercent, (v) => (this._currentPercent = v))} %
@@ -409,28 +438,30 @@ export class ZappiCard extends LitElement {
             %
           </label>
           <button
-            class=${this._preset === "max" ? "selected" : ""}
+            class="pill ${this._preset === "max" ? "selected" : ""}"
             ?disabled=${max === undefined}
             title=${max === undefined ? "Set the max charge % in the card settings" : `Charge to ${max}%`}
             @click=${() => this._togglePreset("max")}
           >
             Max allowed${max !== undefined ? ` (${max}%)` : ""}
           </button>
-          <button class=${this._preset === "full" ? "selected" : ""} @click=${() => this._togglePreset("full")}>
+          <button class="pill ${this._preset === "full" ? "selected" : ""}" @click=${() => this._togglePreset("full")}>
             100%
           </button>
         </div>
-        <div class="estimate ${"problem" in plan ? "problem" : ""}">
-          ${"problem" in plan
-            ? plan.problem
-            : plan.from === undefined
-              ? html`Full charge: <strong>${plan.kwh} kWh</strong>, the car stops when it's full`
-              : html`≈ <strong>${plan.kwh} kWh</strong> to charge from ${plan.from}% to ${plan.to}%`}
-        </div>
+        ${"problem" in plan
+          ? plan.problem
+            ? html`<div class="estimate problem">${plan.problem}</div>`
+            : nothing
+          : html`<div class="estimate">
+              ${plan.from === undefined
+                ? html`Full charge: <strong>${plan.kwh} kWh</strong>, the car stops when it's full`
+                : html`≈ <strong>${plan.kwh} kWh</strong> to charge from ${plan.from}% to ${plan.to}%`}
+            </div>`}
         ${kwh !== undefined ? this._renderModeNote() : nothing}
-        <div class="boost-row">
-          <label class="field">
-            Ready by
+        <div class="boost-row actions">
+          <label class="field" title="Ready by (smart boost)">
+            <span class="label">Ready by</span>
             <input
               type="time"
               step="900"
@@ -440,19 +471,22 @@ export class ZappiCard extends LitElement {
           </label>
           <button
             class="primary"
+            title="Smart boost"
             ?disabled=${busy || kwh === undefined || !this._boostBy}
             @click=${() => kwh && this._startBoost("smart-boost", kwh)}
           >
-            <ha-icon icon="mdi:clock-fast"></ha-icon>Smart boost
+            <ha-icon icon="mdi:clock-fast"></ha-icon><span class="label">Smart boost</span>
           </button>
-        </div>
-        <div class="boost-row">
-          <button ?disabled=${busy || kwh === undefined} @click=${() => kwh && this._startBoost("boost", kwh)}>
-            <ha-icon icon="mdi:rocket-launch"></ha-icon>Boost now
+          <button
+            title="Boost now"
+            ?disabled=${busy || kwh === undefined}
+            @click=${() => kwh && this._startBoost("boost", kwh)}
+          >
+            <ha-icon icon="mdi:rocket-launch"></ha-icon><span class="label">Boost now</span>
           </button>
           <!-- Always offered: a scheduled smart boost reports "Paused", not "Boosting". -->
-          <button class="danger" ?disabled=${busy} @click=${this._stopBoost}>
-            <ha-icon icon="mdi:stop"></ha-icon>Stop boost
+          <button class="danger" title="Stop boost" ?disabled=${busy} @click=${this._stopBoost}>
+            <ha-icon icon="mdi:stop"></ha-icon><span class="label">Stop</span>
           </button>
         </div>
       </div>
@@ -478,21 +512,31 @@ export class ZappiCard extends LitElement {
     return `${DAY_NAMES[(date.getDay() + 6) % 7]} ${d}/${m}`;
   }
 
-  /** kWh for the upcoming charge from the typed start %, or why it can't be worked out. */
-  private _upcomingPlan(upcoming: UpcomingCharge): { kwh: number; start: number } | { problem: string } {
+  /** kWh for the upcoming charge from the typed start and target %, or why it can't be worked out. */
+  private _upcomingPlan(): { kwh: number; start: number; target: number } | { problem: string } {
     const start = this._parsePercent(this._upcomingStart);
-    const target = upcoming.target_percent;
-    if (target === null) return { problem: "Set a target % for this day in the schedule to recalculate." };
-    if (this._kwhPerPercent === undefined) {
-      return { problem: "Add calibration charges in the card settings to recalculate." };
-    }
-    if (start === undefined || start < 0 || start > 100) return { problem: "Enter the expected start %." };
-    // At or above the target there's nothing to charge; applying 0 kWh skips this charge.
-    return { kwh: Math.ceil(kwhForTarget(this._kwhPerPercent, start, target)), start };
+    const target = this._parsePercent(this._upcomingTarget);
+    // Kept short: these show inline on the one-line upcoming charge. Empty fields need no words.
+    if (this._kwhPerPercent === undefined) return { problem: "needs calibration" };
+    if (start === undefined || target === undefined) return { problem: "" };
+    if (start < 0 || start > 100 || target < 0 || target > 100) return { problem: "0–100%" };
+    if (target <= start) return { problem: "target ≤ start, use Skip" };
+    return { kwh: Math.ceil(kwhForTarget(this._kwhPerPercent, start, target)), start, target };
   }
 
-  private _applyUpcoming(upcoming: UpcomingCharge, override: { kwh: number; start_percent: number } | null): void {
+  private _applyUpcoming(
+    upcoming: UpcomingCharge,
+    override: { kwh: number; start_percent: number | null; target_percent: number | null } | null,
+  ): void {
     void this._call("upcoming", () => setOverride(this.hass, upcoming.date, override));
+  }
+
+  private _skipUpcoming(upcoming: UpcomingCharge): void {
+    this._applyUpcoming(upcoming, {
+      kwh: 0,
+      start_percent: upcoming.start_percent,
+      target_percent: upcoming.target_percent,
+    });
   }
 
   private _renderUpcoming(): TemplateResult | typeof nothing {
@@ -500,73 +544,110 @@ export class ZappiCard extends LitElement {
     if (!status) return nothing;
     const upcoming = status.upcoming;
     if (!upcoming) {
-      return html`<div>
-        <div class="section-label">Upcoming charge</div>
-        <div class="estimate problem">
-          ${status.state === "disabled" ? "The schedule is off." : "Nothing scheduled in the next week."}
-        </div>
+      return html`<div class="block upcoming">
+        <ha-icon icon="mdi:calendar-clock"></ha-icon>
+        <span class="estimate problem">
+          ${status.state === "disabled" ? "Schedule is off" : "Nothing scheduled in the next week"}
+        </span>
       </div>`;
     }
 
-    const plan = this._upcomingPlan(upcoming);
-    const changed = "kwh" in plan && (plan.kwh !== upcoming.kwh || plan.start !== upcoming.start_percent);
-    const running = status.run_date === upcoming.date && ["charging", "overrun", "waiting"].includes(status.state);
     const busy = this._pending !== undefined;
+    const when = upcoming.ready_by
+      ? `by ${upcoming.ready_by}`
+      : upcoming.intervals.map((iv) => `${iv.start}–${iv.end}`).join(", ");
+    // Octopus mode: Octopus charges, Zappistant sets how much (% of its battery to add) and by when.
+    const octopusBattery = status.mode === "octopus" ? status.octopus_battery_kwh : undefined;
+
+    if (upcoming.skipped) {
+      return html`
+        <div class="block upcoming skipped">
+          <ha-icon icon="mdi:calendar-remove"></ha-icon>
+          <span><strong>${this._dayLabel(upcoming.date)}</strong> ${when}</span>
+          <span class="estimate problem">Skipped</span>
+          <span class="spacer"></span>
+          <button ?disabled=${busy} @click=${() => this._applyUpcoming(upcoming, null)}>Undo</button>
+        </div>
+      `;
+    }
+
+    const plan = this._upcomingPlan();
+    const changed =
+      "kwh" in plan &&
+      (plan.kwh !== upcoming.kwh || plan.start !== upcoming.start_percent || plan.target !== upcoming.target_percent);
+    const running = status.run_date === upcoming.date && ["charging", "overrun", "waiting"].includes(status.state);
+    const octopusSet = status.octopus?.date === upcoming.date ? status.octopus : undefined;
+    const percentInput = (value: string, onInput: (v: string) => void) => html`
+      <input
+        type="number"
+        inputmode="numeric"
+        min="0"
+        max="100"
+        step="1"
+        .value=${value}
+        @input=${(ev: Event) => onInput((ev.target as HTMLInputElement).value)}
+      />
+    `;
+
+    // The longer explanation goes in the tooltip so the block stays on one line.
+    const detail = octopusSet
+      ? `Octopus is set to add ${octopusSet.percent}% by ${octopusSet.ready_by}.`
+      : upcoming.overridden
+        ? `Adjusted for this charge: ${upcoming.kwh} kWh instead of ${upcoming.planned_kwh} kWh.`
+        : `Planned: ${upcoming.kwh} kWh. Change the percentages to adjust just this charge.`;
 
     return html`
-      <div class="upcoming">
-        <div class="section-label">Upcoming charge</div>
-        <div class="upcoming-head">
-          <ha-icon icon="mdi:calendar-clock"></ha-icon>
-          <span>
-            <strong>${this._dayLabel(upcoming.date)}</strong>
-            · ${upcoming.intervals.map((iv) => `${iv.start}–${iv.end}`).join(", ")}
-            ${upcoming.target_percent !== null ? html` · to ${upcoming.target_percent}%` : nothing}
-          </span>
-        </div>
-        <div class="boost-row">
-          <label class="field">
-            Start
-            <input
-              type="number"
-              inputmode="numeric"
-              min="0"
-              max="100"
-              step="1"
-              .value=${this._upcomingStart}
-              @input=${(ev: Event) => (this._upcomingStart = (ev.target as HTMLInputElement).value)}
-            />
-            %
-          </label>
-          <span class="estimate">
-            ${"kwh" in plan
-              ? html`→ <strong>${plan.kwh} kWh</strong>${plan.kwh === 0 ? " (skips this charge)" : ""}`
-              : nothing}
-          </span>
-          ${changed
-            ? html`<button
-                class="primary"
-                ?disabled=${busy}
-                @click=${() => "kwh" in plan && this._applyUpcoming(upcoming, { kwh: plan.kwh, start_percent: plan.start })}
-              >
-                Apply
-              </button>`
-            : nothing}
-          ${upcoming.overridden
-            ? html`<button ?disabled=${busy} @click=${() => this._applyUpcoming(upcoming, null)}>
-                Use weekly plan
-              </button>`
-            : nothing}
-        </div>
-        <div class="estimate problem">
+      <div class="block upcoming" title=${detail}>
+        <ha-icon icon="mdi:calendar-clock"></ha-icon>
+        <span><strong>${this._dayLabel(upcoming.date)}</strong> ${when}</span>
+        <label class="field">from ${percentInput(this._upcomingStart, (v) => (this._upcomingStart = v))} %</label>
+        <label class="field">to ${percentInput(this._upcomingTarget, (v) => (this._upcomingTarget = v))} %</label>
+        <span class="estimate ${"problem" in plan ? "problem" : ""}">
           ${"problem" in plan
             ? plan.problem
-            : running
-              ? `${SCHEDULE_STATES[status.state]} · ${(status.delivered_kwh ?? 0).toFixed(1)} of ${upcoming.kwh} kWh`
-              : upcoming.overridden
-                ? `Adjusted for this charge: ${upcoming.kwh} kWh instead of ${upcoming.planned_kwh} kWh.`
-                : `Planned: ${upcoming.kwh} kWh. Change the start % to adjust just this charge.`}
-        </div>
+            : html`→ <strong>${plan.kwh} kWh</strong>${octopusBattery
+                ? html` ·
+                    <span title="Octopus is asked to add this % of its ${octopusBattery} kWh battery">
+                      +${octopusPercent(plan.kwh, octopusBattery)}%
+                    </span>`
+                : ""}`}
+        </span>
+        ${running
+          ? html`<span class="estimate problem">
+              ${SCHEDULE_STATES[status.state]} ${(status.delivered_kwh ?? 0).toFixed(1)}/${upcoming.kwh} kWh
+            </span>`
+          : nothing}
+        <span class="spacer"></span>
+        ${changed
+          ? html`<button
+              class="primary"
+              ?disabled=${busy}
+              @click=${() =>
+                "kwh" in plan &&
+                this._applyUpcoming(upcoming, { kwh: plan.kwh, start_percent: plan.start, target_percent: plan.target })}
+            >
+              Apply
+            </button>`
+          : nothing}
+        ${upcoming.overridden
+          ? html`<button
+              ?disabled=${busy}
+              title="Use the weekly plan again"
+              @click=${() => this._applyUpcoming(upcoming, null)}
+            >
+              Reset
+            </button>`
+          : nothing}
+        <button
+          class="skip"
+          ?disabled=${busy}
+          title=${octopusBattery
+            ? "Skip this charge. Octopus can't be set below 5%, so it may still add a little; turn smart charging off in the Octopus app to skip completely."
+            : "Skip this charge"}
+          @click=${() => this._skipUpcoming(upcoming)}
+        >
+          <ha-icon icon="mdi:debug-step-over"></ha-icon>Skip
+        </button>
       </div>
     `;
   }
@@ -574,6 +655,12 @@ export class ZappiCard extends LitElement {
   /** Explain what happens after the boost, since the zappi falls back to the selected mode. */
   private _renderModeNote(): TemplateResult | typeof nothing {
     const mode = this._mode();
+    if (this._octopusMode()) {
+      return html`<div class="note">
+        <ha-icon icon="mdi:information-outline"></ha-icon>Intelligent Octopus Go is in control: a boost from here charges
+        at the normal rate, and the zappi stays in ${mode ?? "Eco+"}.
+      </div>`;
+    }
     if (this._preset === "full" || mode === "Stopped" || mode === undefined) return nothing;
     if (this._willSwitchToStopped()) {
       return html`<div class="note">

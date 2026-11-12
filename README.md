@@ -49,6 +49,7 @@ The card finds the zappi's other sensors from the charge mode entity's device. S
 | ----------------------- | ------------ | ---------------------------------------------------- |
 | `entity`                | **required** | myenergi zappi charge mode `select` entity           |
 | `name`                  | device name  | Card title                                           |
+| `show_stats`            | `true`       | Show charging power and session energy               |
 | `show_power_flow`       | `true`       | Show solar, grid and home power                      |
 | `show_boost`            | `true`       | Show boost controls                                  |
 | `show_upcoming`         | `true`       | Show the next scheduled charge (needs Zappistant)    |
@@ -122,10 +123,10 @@ Press **Save** to send the plan to Home Assistant. Zappistant then runs it even 
   what's still missing. An overrun is dropped if it hasn't finished by the end of the next day.
 
 The card's **Upcoming charge** section shows the next charge the schedule will run (today's if it
-still has slots left, otherwise the next active day) with its expected start %. Change the start %
-to recalculate the kWh from your calibration and press **Apply**: that adjusts only this one charge
-and leaves the weekly plan as it is. 0 kWh (start at or above the target) skips the charge.
-**Use weekly plan** removes the adjustment.
+still has slots left, otherwise the next active day) on one line, with its start and target %. Change
+either to recalculate the kWh from your calibration and press **Apply**: that adjusts only this one
+charge and leaves the weekly plan as it is. **Reset** removes the adjustment. **Skip** (on the right)
+cancels just this charge; it stays shown as skipped, with **Undo**, until its slots have passed.
 
 Zappistant adds `sensor.zappi_schedule_status` (with progress attributes),
 `switch.zappi_schedule_enabled` to turn the whole schedule on or off, and
@@ -162,8 +163,39 @@ between Fast and Stopped against Zappistant. Predbat's myenergi support (or `car
 `car_charging_energy` pointed at the zappi's plug status and session energy) still covers a car that
 is charging right now and keeps car energy out of the house load history.
 
-On **Intelligent Octopus Go**, `octopus_intelligent_slot` is for Octopus's own dispatch sensor and
-Octopus schedules the charging, so this setup needs revisiting before switching tariff.
+In Octopus mode (below), point `octopus_intelligent_slot` at the Octopus Energy integration's own
+dispatch sensor instead (Predbat's default). Zappistant's charge slot sensor then only lists boosts
+from the card.
+
+### Intelligent Octopus Go (Octopus mode)
+
+On Intelligent Octopus Go, Octopus can control the zappi itself and charge in its cheapest slots.
+Choose **Intelligent Octopus Go** as "Who controls charging" when adding Zappistant, or later under
+its **Configure** options. A second screen asks for the
+[Octopus Energy integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy)'s
+Intelligent **charge target** (`number.octopus_energy_…_intelligent_charge_target`) and **target
+time** (`time.` or `select.octopus_energy_…_intelligent_target_time`), which are found
+automatically, and the **battery size you entered in the Octopus app**.
+
+With a zappi, Octopus can't see the car's battery %, so its charge target is the **% of the battery
+to add**, not the level to stop at. Zappistant works that out from the charge's kWh, which comes from
+your calibration and includes charging losses: kWh ÷ Octopus's battery size, rounded up and kept
+within Octopus's 5–100%. For example, 45 → 80% at 0.581 kWh/% is 20.3 kWh, which on a 61 kWh battery
+is 34% to add.
+
+In Octopus mode:
+
+- Each weekday in the schedule has a **ready-by time** (the next morning) instead of slots. Octopus
+  picks the slots.
+- Zappistant keeps Octopus's charge target and target time set for the upcoming charge: the
+  evening's charge, until its ready-by time the next morning. If they're changed elsewhere (e.g. in
+  the Octopus app), they're set back to the plan.
+- **Upcoming charge** on the card shows the % Octopus will add. Changing the start % adjusts it for
+  that night only.
+- Zappistant never boosts or switches the zappi to Stopped. Keep the zappi in **Eco+** for Octopus.
+  Boost now from the card still works, at the normal rate.
+- A night with 0 kWh (start % at or above the target) sets Octopus's minimum of 5%. To skip
+  charging completely, turn off smart charging in the Octopus app or don't plug in.
 
 ## Development
 

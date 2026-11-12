@@ -17,11 +17,16 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from custom_components.zappistant.const import (
+    CONF_CONTROL_MODE,
     CONF_MODE_ENTITY,
+    CONF_OCTOPUS_BATTERY,
+    CONF_OCTOPUS_TARGET_ENTITY,
+    CONF_OCTOPUS_TIME_ENTITY,
     CONF_PLUG_ENTITY,
     CONF_SESSION_ENTITY,
     CONF_STATUS_ENTITY,
     DOMAIN,
+    MODE_OCTOPUS,
 )
 
 MODE = "select.myenergi_zappi_charge_mode"
@@ -30,6 +35,9 @@ PLUG = "sensor.myenergi_zappi_plug_status"
 STATUS = "sensor.myenergi_zappi_status"
 SCHEDULE_STATUS = "sensor.zappi_schedule_status"
 CHARGE_SLOT = "binary_sensor.zappi_schedule_charge_slot"
+OCTOPUS_TARGET = "number.octopus_energy_dev1_intelligent_charge_target"
+OCTOPUS_TIME = "time.octopus_energy_dev1_intelligent_target_time"
+ZAPPI_DATA = {CONF_MODE_ENTITY: MODE, CONF_SESSION_ENTITY: SESSION, CONF_PLUG_ENTITY: PLUG, CONF_STATUS_ENTITY: STATUS}
 
 # 2026-11-10 is a Tuesday.
 TUESDAY = 1
@@ -279,3 +287,121 @@ async def test_config_flow_discovers_sensors(hass: HomeAssistant) -> None:
     assert result["data"][CONF_STATUS_ENTITY] == STATUS
     assert result["data"][CONF_PLUG_ENTITY] == PLUG
     assert result["data"][CONF_SESSION_ENTITY] == SESSION
+
+
+def _register_octopus_entities(hass: HomeAssistant) -> None:
+    registry = er.async_get(hass)
+    for entity_id in (OCTOPUS_TARGET, OCTOPUS_TIME):
+        domain, object_id = entity_id.split(".")
+        registry.async_get_or_create(domain, "octopus_energy", object_id, suggested_object_id=object_id)
+
+
+async def test_config_flow_octopus_step(hass: HomeAssistant) -> None:
+    _register_octopus_entities(hass)
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**ZAPPI_DATA, CONF_CONTROL_MODE: MODE_OCTOPUS}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "octopus"
+    # The Octopus entities are found and suggested.
+    suggested = {
+        str(key): key.description["suggested_value"]
+        for key in result["data_schema"].schema
+        if key.description and "suggested_value" in key.description
+    }
+    assert suggested[CONF_OCTOPUS_TARGET_ENTITY] == OCTOPUS_TARGET
+    assert suggested[CONF_OCTOPUS_TIME_ENTITY] == OCTOPUS_TIME
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_OCTOPUS_TARGET_ENTITY: OCTOPUS_TARGET, CONF_OCTOPUS_TIME_ENTITY: OCTOPUS_TIME, CONF_OCTOPUS_BATTERY: 61},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_CONTROL_MODE] == MODE_OCTOPUS
+    assert result["data"][CONF_OCTOPUS_BATTERY] == 61
+
+
+async def test_options_flow_switches_to_octopus(hass: HomeAssistant) -> None:
+    _set_charger(hass)
+    entry = MockConfigEntry(domain=DOMAIN, data=ZAPPI_DATA)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_CONTROL_MODE: MODE_OCTOPUS, "switch_to_stopped": True, "charge_rate": 7.0}
+    )
+    assert result["step_id"] == "octopus"
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_OCTOPUS_TARGET_ENTITY: OCTOPUS_TARGET, CONF_OCTOPUS_TIME_ENTITY: OCTOPUS_TIME, CONF_OCTOPUS_BATTERY: 61},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.options[CONF_CONTROL_MODE] == MODE_OCTOPUS
+    assert hass.states.get(SCHEDULE_STATUS).state == "disabled"  # reloaded in Octopus mode, schedule off
+
+
+async def test_octopus_mode_sets_target_and_ready_by(
+    hass: HomeAssistant, freezer: FrozenDateTimeFactory, hass_ws_client
+) -> None:
+    await hass.config.async_set_time_zone("UTC")
+    client = await hass_ws_client(hass)
+    freezer.move_to(datetime(2026, 11, 10, 18, 0, tzinfo=dt_util.UTC))
+    _set_charger(hass)
+    hass.states.async_set(OCTOPUS_TARGET, "100")
+    hass.states.async_set(OCTOPUS_TIME, "06:00:00")
+    calls = {
+        "number": async_mock_service(hass, "number", "set_value"),
+        "time": async_mock_service(hass, "time", "set_value"),
+        "select": async_mock_service(hass, "select", "select_option"),
+        "boost": async_mock_service(hass, "myenergi", "myenergi_boost"),
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **ZAPPI_DATA,
+            CONF_CONTROL_MODE: MODE_OCTOPUS,
+            CONF_OCTOPUS_TARGET_ENTITY: OCTOPUS_TARGET,
+            CONF_OCTOPUS_TIME_ENTITY: OCTOPUS_TIME,
+            CONF_OCTOPUS_BATTERY: 61,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    schedule = _schedule([], kwh=21)
+    schedule["days"][TUESDAY]["ready_by"] = "07:00"
+    await client.send_json_auto_id({"type": "zappistant/schedule/save", "schedule": schedule})
+    assert (await client.receive_json())["success"]
+
+    # 21 kWh of a 61 kWh battery is 34.4%, rounded up to 35% to add.
+    assert [(c.data["entity_id"], c.data["value"]) for c in calls["number"]] == [(OCTOPUS_TARGET, 35)]
+    assert [(c.data["entity_id"], c.data["time"]) for c in calls["time"]] == [(OCTOPUS_TIME, "07:00:00")]
+    status = hass.states.get(SCHEDULE_STATUS)
+    assert status.state == "octopus"
+    assert status.attributes["octopus"] == {"date": "2026-11-10", "percent": 35, "ready_by": "07:00"}
+    assert status.attributes["upcoming"]["ready_by"] == "07:00"
+
+    # Once Octopus shows the new values nothing more is sent, and Zappistant never boosts or
+    # switches the zappi to Stopped.
+    hass.states.async_set(OCTOPUS_TARGET, "35")
+    hass.states.async_set(OCTOPUS_TIME, "07:00:00")
+    await _move_to(hass, freezer, datetime(2026, 11, 10, 23, 30, tzinfo=dt_util.UTC))
+    assert len(calls["number"]) == 1 and len(calls["time"]) == 1
+    assert not calls["boost"] and not calls["select"]
+
+    # Changing the target in the Octopus app gets put back to the plan.
+    hass.states.async_set(OCTOPUS_TARGET, "80")
+    await hass.async_block_till_done()
+    assert [c.data["value"] for c in calls["number"]] == [35, 35]
+
+    # A one-off start % for tonight changes what Octopus is asked to add.
+    await client.send_json_auto_id(
+        {"type": "zappistant/override/set", "date": "2026-11-10", "kwh": 12.2, "start_percent": 60}
+    )
+    assert (await client.receive_json())["success"]
+    assert calls["number"][-1].data["value"] == 20

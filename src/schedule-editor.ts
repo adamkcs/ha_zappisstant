@@ -10,12 +10,15 @@ import {
   fetchSchedule,
   intervalsToSlots,
   isActive,
+  octopusPercent,
   runsOvernight,
   saveSchedule,
+  slotTime,
   slotsToIntervals,
   todayIndex,
   type DayPlan,
   type Schedule,
+  type ScheduleStatus,
 } from "./schedule";
 import type { HomeAssistant } from "./types";
 
@@ -28,6 +31,7 @@ export class ZappiScheduleEditor extends LitElement {
   @property({ attribute: false }) public kwhPerPercent?: number;
 
   @state() private _schedule?: Schedule;
+  @state() private _status?: ScheduleStatus;
   @state() private _day = todayIndex();
   @state() private _error?: string;
   @state() private _saving = false;
@@ -46,7 +50,9 @@ export class ZappiScheduleEditor extends LitElement {
 
   private async _load(): Promise<void> {
     try {
-      this._setSaved((await fetchSchedule(this.hass)).schedule);
+      const { schedule, status } = await fetchSchedule(this.hass);
+      this._status = status;
+      this._setSaved(schedule);
     } catch (err: any) {
       this._error = `Couldn't load the schedule: ${err?.message ?? err}`;
       this._schedule = emptySchedule();
@@ -56,6 +62,11 @@ export class ZappiScheduleEditor extends LitElement {
   private _setSaved(schedule: Schedule): void {
     this._schedule = schedule;
     this._savedJson = JSON.stringify(schedule);
+  }
+
+  /** In Octopus mode Octopus picks the slots, so each day has a ready-by time instead. */
+  private get _octopus(): boolean {
+    return this._status?.mode === "octopus";
   }
 
   private get _dirty(): boolean {
@@ -174,10 +185,14 @@ export class ZappiScheduleEditor extends LitElement {
     return html`
       <button class="week-row ${index === this._day ? "selected" : ""}" @click=${() => (this._day = index)}>
         <span class="week-day">${DAY_NAMES[index].slice(0, 3)}</span>
-        <span class="strip ${day.enabled ? "" : "off"}">
-          ${slots.map((on) => html`<span class=${on ? "on" : ""}></span>`)}
-        </span>
-        <span class="week-kwh">${isActive(day) ? `${day.kwh} kWh` : "–"}</span>
+        ${this._octopus
+          ? html`<span class="week-ready ${day.enabled ? "" : "off"}">
+              ${day.ready_by ? `Ready by ${day.ready_by} next morning` : ""}
+            </span>`
+          : html`<span class="strip ${day.enabled ? "" : "off"}">
+              ${slots.map((on) => html`<span class=${on ? "on" : ""}></span>`)}
+            </span>`}
+        <span class="week-kwh">${isActive(day, this._status?.mode) ? `${day.kwh} kWh` : "–"}</span>
       </button>
     `;
   }
@@ -198,7 +213,6 @@ export class ZappiScheduleEditor extends LitElement {
 
   private _renderDay(day: DayPlan): TemplateResult {
     const name = DAY_NAMES[this._day];
-    const slots = intervalsToSlots(day.intervals);
     const numberInput = (value: number | null, max: number, step: string, onChange: (v: number | null) => void) => html`
       <input
         type="number"
@@ -225,6 +239,70 @@ export class ZappiScheduleEditor extends LitElement {
           Charge on ${name}s
         </label>
 
+        ${this._octopus ? this._renderReadyBy(day) : this._renderSlots(day)}
+
+        <div class="amounts">
+          <label class="field">
+            Expected start ${numberInput(day.start_percent, 100, "1", (v) => this._updateDay(this._day, { start_percent: v }))} %
+          </label>
+          <label class="field">
+            Target ${numberInput(day.target_percent, 100, "1", (v) => this._updateDay(this._day, { target_percent: v }))} %
+          </label>
+          <label class="field">
+            ${numberInput(day.kwh, 200, "0.1", (v) => this._updateDay(this._day, { kwh: v, kwh_manual: v !== null }))} kWh
+          </label>
+          ${day.kwh_manual
+            ? html`<button class="small" @click=${() => this._updateDay(this._day, { kwh_manual: false })}>
+                Calculate
+              </button>`
+            : html`<span class="hint">calculated</span>`}
+        </div>
+        ${!day.kwh_manual && this.kwhPerPercent === undefined
+          ? html`<div class="hint">Add calibration charges in the card settings to calculate kWh, or type it in.</div>`
+          : nothing}
+        ${this._octopus && day.kwh && this._status?.octopus_battery_kwh
+          ? html`<div class="hint">
+              Octopus will be asked to add ${octopusPercent(day.kwh, this._status.octopus_battery_kwh)}% of its
+              ${this._status.octopus_battery_kwh} kWh battery.
+            </div>`
+          : nothing}
+
+        <div class="copy">
+          <span class="hint">Copy ${name} to</span>
+          ${DAY_NAMES.map((dayName, i) =>
+            i === this._day
+              ? nothing
+              : html`<button class="small" @click=${() => this._copyTo(i)}>${dayName.slice(0, 3)}</button>`,
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  private _renderReadyBy(day: DayPlan): TemplateResult {
+    return html`
+      <label class="field">
+        Ready by (next morning)
+        <select
+          .value=${day.ready_by ?? ""}
+          @change=${(ev: Event) => this._updateDay(this._day, { ready_by: (ev.target as HTMLSelectElement).value || null })}
+        >
+          <option value="" ?selected=${!day.ready_by}>–</option>
+          ${Array.from({ length: SLOTS_PER_DAY }, (_, i) => slotTime(i)).map(
+            (time) => html`<option value=${time} ?selected=${day.ready_by === time}>${time}</option>`,
+          )}
+        </select>
+      </label>
+      <div class="hint">
+        Plug in in the evening and Octopus picks the cheapest slots overnight. Zappistant sets Octopus's charge
+        target and ready-by time for each evening's charge.
+      </div>
+    `;
+  }
+
+  private _renderSlots(day: DayPlan): TemplateResult {
+    const slots = intervalsToSlots(day.intervals);
+    return html`
         <div
           class="grid"
           @pointerdown=${this._pointerDown}
@@ -285,36 +363,6 @@ export class ZappiScheduleEditor extends LitElement {
               )}
             </div>`
           : html`<div class="hint">Tap or drag on the grid to pick charging slots (up to ${MAX_INTERVALS} intervals).</div>`}
-
-        <div class="amounts">
-          <label class="field">
-            Expected start ${numberInput(day.start_percent, 100, "1", (v) => this._updateDay(this._day, { start_percent: v }))} %
-          </label>
-          <label class="field">
-            Target ${numberInput(day.target_percent, 100, "1", (v) => this._updateDay(this._day, { target_percent: v }))} %
-          </label>
-          <label class="field">
-            ${numberInput(day.kwh, 200, "0.1", (v) => this._updateDay(this._day, { kwh: v, kwh_manual: v !== null }))} kWh
-          </label>
-          ${day.kwh_manual
-            ? html`<button class="small" @click=${() => this._updateDay(this._day, { kwh_manual: false })}>
-                Calculate
-              </button>`
-            : html`<span class="hint">calculated</span>`}
-        </div>
-        ${!day.kwh_manual && this.kwhPerPercent === undefined
-          ? html`<div class="hint">Add calibration charges in the card settings to calculate kWh, or type it in.</div>`
-          : nothing}
-
-        <div class="copy">
-          <span class="hint">Copy ${name} to</span>
-          ${DAY_NAMES.map((dayName, i) =>
-            i === this._day
-              ? nothing
-              : html`<button class="small" @click=${() => this._copyTo(i)}>${dayName.slice(0, 3)}</button>`,
-          )}
-        </div>
-      </div>
     `;
   }
 
@@ -411,6 +459,22 @@ export class ZappiScheduleEditor extends LitElement {
       grid-template-columns: repeat(${SLOTS_PER_DAY}, 1fr);
       gap: 1px;
       height: 10px;
+    }
+    .week-ready {
+      font-size: 0.85rem;
+      text-align: left;
+      color: var(--primary-text-color);
+    }
+    .week-ready.off {
+      opacity: 0.4;
+    }
+    select {
+      font: inherit;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--divider-color);
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
     }
     .strip span {
       background: var(--divider-color);

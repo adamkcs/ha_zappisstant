@@ -245,9 +245,68 @@ class OverrideTest(unittest.TestCase):
         self.assertEqual(upcoming["start_percent"], 52)
         self.assertTrue(upcoming["overridden"])
 
+    def test_upcoming_shows_adjusted_target(self):
+        overrides = {"2026-11-10": planner.validate_override({"kwh": 30, "start_percent": 45, "target_percent": 100})}
+        upcoming = planner.upcoming(self.schedule, at(10, 18), overrides)
+        self.assertEqual((upcoming["start_percent"], upcoming["target_percent"], upcoming["kwh"]), (45, 100, 30))
+
+    def test_skipped_charge_stays_upcoming_until_its_slot_ends(self):
+        overrides = {"2026-11-10": planner.validate_override({"kwh": 0})}
+        upcoming = planner.upcoming(self.schedule, at(10, 18), overrides)
+        self.assertEqual(upcoming["date"], "2026-11-10")
+        self.assertTrue(upcoming["skipped"])
+        self.assertEqual(upcoming["kwh"], 0)
+        self.assertEqual(upcoming["intervals"][0]["start"], "22:00")
+        # Nothing is charged, and once the slot is over the next week's charge is upcoming.
+        _, decision = planner.advance(self.schedule, None, at(10, 22), 0.0, overrides)
+        self.assertFalse(decision.charge)
+        self.assertEqual(planner.upcoming(self.schedule, at(11, 0, 30), overrides)["date"], "2026-11-17")
+
     def test_no_upcoming_when_disabled(self):
         self.schedule["enabled"] = False
         self.assertIsNone(planner.upcoming(self.schedule, at(10, 18)))
+
+
+class OctopusTest(unittest.TestCase):
+    """Octopus mode: Tuesday evening's charge must be ready by 07:00 on Wednesday."""
+
+    def setUp(self):
+        self.schedule = planner.empty_schedule()
+        self.schedule["enabled"] = True
+        self.schedule["days"][TUESDAY] = {
+            **planner.empty_day(),
+            "enabled": True,
+            "start_percent": 45,
+            "target_percent": 80,
+            "kwh": 21,
+            "ready_by": "07:00",
+        }
+        self.schedule = planner.validate_schedule(self.schedule)
+
+    def test_rejects_ready_by_at_midnight(self):
+        self.schedule["days"][TUESDAY]["ready_by"] = "24:00"
+        with self.assertRaises(ValueError):
+            planner.validate_schedule(self.schedule)
+
+    def test_upcoming_until_ready_by_next_morning(self):
+        upcoming = planner.octopus_upcoming(self.schedule, at(10, 18))
+        self.assertEqual(upcoming["date"], "2026-11-10")
+        self.assertEqual(upcoming["ready_by"], "07:00")
+        self.assertEqual(upcoming["kwh"], 21)
+        # Still Tuesday's charge overnight; after 07:00 on Wednesday it's next Tuesday's.
+        self.assertEqual(planner.octopus_upcoming(self.schedule, at(11, 6, 30))["date"], "2026-11-10")
+        self.assertEqual(planner.octopus_upcoming(self.schedule, at(11, 7))["date"], "2026-11-17")
+
+    def test_zero_kwh_override_keeps_the_night(self):
+        overrides = {"2026-11-10": planner.validate_override({"kwh": 0})}
+        upcoming = planner.octopus_upcoming(self.schedule, at(10, 18), overrides)
+        self.assertEqual((upcoming["date"], upcoming["kwh"]), ("2026-11-10", 0))
+
+    def test_percent_to_add(self):
+        self.assertEqual(planner.octopus_percent(20.3, 61), 34)
+        self.assertEqual(planner.octopus_percent(30.5, 61), 50)  # exactly 50%, no rounding up
+        self.assertEqual(planner.octopus_percent(0, 61), planner.OCTOPUS_MIN_PERCENT)
+        self.assertEqual(planner.octopus_percent(80, 61), planner.OCTOPUS_MAX_PERCENT)
 
 
 class PlannedSlotsTest(unittest.TestCase):

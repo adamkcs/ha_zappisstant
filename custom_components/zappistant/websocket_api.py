@@ -105,9 +105,10 @@ async def ws_stop_boost(
     {
         vol.Required("type"): "zappistant/override/set",
         vol.Required("date"): str,
-        # Leave out kwh (or send null) to go back to the weekly plan for that date.
+        # Leave out kwh (or send null) to go back to the weekly plan for that date; 0 skips it.
         vol.Optional("kwh"): vol.Any(None, vol.Coerce(float)),
         vol.Optional("start_percent"): vol.Any(None, vol.Coerce(float)),
+        vol.Optional("target_percent"): vol.Any(None, vol.Coerce(float)),
     }
 )
 @websocket_api.async_response
@@ -118,7 +119,11 @@ async def ws_set_override(
         return
     override = None
     if msg.get("kwh") is not None:
-        override = {"kwh": msg["kwh"], "start_percent": msg.get("start_percent")}
+        override = {
+            "kwh": msg["kwh"],
+            "start_percent": msg.get("start_percent"),
+            "target_percent": msg.get("target_percent"),
+        }
     try:
         await controller.async_set_override(msg["date"], override)
     except ValueError as err:

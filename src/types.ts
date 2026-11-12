@@ -39,6 +39,8 @@ export interface ZappiCardConfig {
   grid_power_entity?: string;
   solar_power_entity?: string;
   home_power_entity?: string;
+  /** Show the charging power and session energy tiles. */
+  show_stats?: boolean;
   show_power_flow?: boolean;
   show_boost?: boolean;
   /** Show the next scheduled charge when the Zappistant integration is installed. */
