@@ -1,6 +1,6 @@
 {
   "name": "zappi-card",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Home Assistant dashboard card for controlling a myenergi zappi EV charger",
   "type": "module",
   "main": "dist/zappi-card.js",

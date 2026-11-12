@@ -15,7 +15,7 @@ import { cardStyles } from "./styles";
 import type { HomeAssistant, LovelaceCardEditor, ZappiCardConfig } from "./types";
 import "./editor";
 
-const CARD_VERSION = "0.1.0";
+const CARD_VERSION = "0.1.1";
 
 const MODE_ICONS: Record<string, string> = {
   Fast: "mdi:lightning-bolt",
