@@ -119,5 +119,9 @@ npm run typecheck
 npm run preview   # build and serve dev/preview.html with mock data
 ```
 
-To try the card in a running Home Assistant, copy or symlink `dist/zappi-card.js` into `<config>/www/`
-and hard-refresh the dashboard after each rebuild.
+### Deploying to Home Assistant
+
+To try a change before releasing it, `npm run deploy` builds the card and copies it over SSH into
+Home Assistant, replacing the HACS-installed copy (and the gzipped copy HACS serves). Copy
+`.deploy.env.example` to `.deploy.env` and set your host first; `npm run deploy -- --dry-run` shows
+what it would do. Hard-refresh the dashboard afterwards. The next HACS update restores the release.

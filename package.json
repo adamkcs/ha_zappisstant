@@ -8,7 +8,8 @@
     "build": "rollup -c",
     "watch": "rollup -c --watch",
     "typecheck": "tsc --noEmit",
-    "preview": "npm run build && echo 'Preview: http://127.0.0.1:5173/dev/preview.html' && python3 -m http.server 5173 --bind 127.0.0.1"
+    "preview": "npm run build && echo 'Preview: http://127.0.0.1:5173/dev/preview.html' && python3 -m http.server 5173 --bind 127.0.0.1",
+    "deploy": "bash scripts/deploy.sh"
   },
   "keywords": [
     "home-assistant",
