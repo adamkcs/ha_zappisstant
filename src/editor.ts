@@ -110,8 +110,11 @@ export class ZappiCardEditor extends LitElement {
               ></zappi-schedule-editor>
             `
           : html`<p class="hint">
-              Install the Zappistant integration (in this repository's <code>custom_components</code>) to plan
-              charging slots for each day of the week.
+              Install the
+              <a href="https://github.com/adamkcs/ha-zappistant-integration" target="_blank" rel="noreferrer"
+                >Zappistant integration</a
+              >
+              (through HACS) to plan charging for each day of the week.
             </p>`}
       </div>
     `;

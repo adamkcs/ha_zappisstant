@@ -1,6 +1,6 @@
 import type { HomeAssistant } from "./types";
 
-// Mirrors custom_components/zappistant/planner.py.
+// Mirrors planner.py in the Zappistant integration (adamkcs/ha-zappistant-integration).
 
 export const SLOTS_PER_DAY = 48;
 export const MAX_INTERVALS = 5;
