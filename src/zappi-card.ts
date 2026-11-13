@@ -15,7 +15,7 @@ import { cardStyles } from "./styles";
 import type { HomeAssistant, LovelaceCardEditor, ZappiCardConfig } from "./types";
 import "./editor";
 
-const CARD_VERSION = "0.1.2";
+const CARD_VERSION = "0.1.3";
 
 const MODE_ICONS: Record<string, string> = {
   Fast: "mdi:lightning-bolt",
@@ -29,6 +29,8 @@ const UNAVAILABLE = ["unavailable", "unknown"];
 // Boost amounts the myenergi integration accepts.
 const MIN_BOOST_KWH = 1;
 const MAX_BOOST_KWH = 99;
+// Longer than one myenergi update (60 s), so the zappi has really changed mode before a boost.
+const MODE_SETTLE_MS = 75_000;
 
 const DEFAULT_READY_BY = "07:00";
 
@@ -54,6 +56,8 @@ export class ZappiCard extends LitElement {
   @state() private _preset: TargetPreset = "custom";
   @state() private _boostBy = DEFAULT_READY_BY;
   @state() private _pending?: string;
+  /** Waiting for the zappi to change to Eco+ before boosting (only without Zappistant). */
+  @state() private _switchingMode = false;
   @state() private _error?: string;
   @state() private _upcomingStart = "";
   @state() private _upcomingTarget = "";
@@ -232,9 +236,16 @@ export class ZappiCard extends LitElement {
         });
         return;
       }
-      // The myenergi integration silently ignores a boost outside Eco and Eco+.
+      // The myenergi integration silently ignores a boost outside Eco and Eco+, and a zappi takes
+      // a while to change mode, so a boost sent straight after switching can be lost.
       if (this._needsEcoPlus()) {
         await this.hass.callService("select", "select_option", { option: "Eco+" }, target);
+        this._switchingMode = true;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, MODE_SETTLE_MS));
+        } finally {
+          this._switchingMode = false;
+        }
       }
       if (kind === "boost") {
         await this.hass.callService("myenergi", "myenergi_boost", { amount: kwh }, target);
@@ -468,7 +479,14 @@ export class ZappiCard extends LitElement {
                 ? html`Full charge: <strong>${plan.kwh} kWh</strong>, the car stops when it's full`
                 : html`≈ <strong>${plan.kwh} kWh</strong> to charge from ${plan.from}% to ${plan.to}%`}
             </div>`}
-        ${kwh !== undefined ? this._renderModeNote() : nothing}
+        ${this._switchingMode
+          ? html`<div class="note">
+              <ha-icon icon="mdi:timer-sand"></ha-icon>Switching to Eco+… the boost starts in about a minute. Keep this
+              page open until it does.
+            </div>`
+          : kwh !== undefined
+            ? this._renderModeNote()
+            : nothing}
         <div class="boost-row actions">
           <label class="field" title="Ready by (smart boost)">
             <span class="label">Ready by</span>
@@ -674,7 +692,7 @@ export class ZappiCard extends LitElement {
     if (mode === undefined) return nothing;
     // The zappi boosts in Eco+ (or Eco) and returns to that mode afterwards.
     const boostMode = this._needsEcoPlus() ? "Eco+" : mode;
-    const first = this._needsEcoPlus() ? `Switches from ${mode} to Eco+ to boost. ` : "";
+    const first = this._needsEcoPlus() ? `Switches from ${mode} to Eco+ first, then boosts about a minute later. ` : "";
     if (this._preset === "full") {
       return first ? html`<div class="note"><ha-icon icon="mdi:information-outline"></ha-icon>${first}</div>` : nothing;
     }
